@@ -41,7 +41,9 @@ import ghidrassistmcp.tools.GetBasicBlocksTool;
 import ghidrassistmcp.tools.ImportFileTool;
 import ghidrassistmcp.tools.OpenProgramTool;
 import ghidrassistmcp.tools.ExportProgramTool;
+import ghidrassistmcp.tools.ClearListingTool;
 import ghidrassistmcp.tools.GetCodeTool;
+import ghidrassistmcp.tools.GetDisassemblyTool;
 import ghidrassistmcp.tools.GetCurrentAddressTool;
 import ghidrassistmcp.tools.GetCurrentFunctionTool;
 import ghidrassistmcp.tools.GetEntryPointsTool;
@@ -163,6 +165,11 @@ public class GhidrAssistMCPBackend implements McpBackend {
         registerTool(new GetTaskStatusTool());
         registerTool(new CancelTaskTool());
         registerTool(new ListTasksTool());
+
+        // Register additional disassembly tools
+        registerTool(new GetDisassemblyTool());       // get_disassembly: read disassembly at any range
+        registerTool(new ClearListingTool());         // clear_listing: undefine code/data in a range
+
 
         Msg.info(this, "GhidrAssistMCP Backend initialized with " + tools.size() + " tools");
     }
