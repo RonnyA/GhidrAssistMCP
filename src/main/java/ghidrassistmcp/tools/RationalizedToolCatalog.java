@@ -119,6 +119,11 @@ public final class RationalizedToolCatalog {
         tool("create_data_var", "create_data_variable", "Define typed data and an optional label at an address; clears code/data units covered by that type.").mutation(true, true);
         tool("create_function", "create_function", "Define a function at an entry address using flow analysis. Optional clear_existing removes existing code/data first.").mutation(true, true);
         tool("disassemble_at", "disassemble_bytes", "Define instructions from bytes at an address/range, modifying the listing. Optional clear_existing removes existing code/data.").mutation(true, true);
+        // Local additions (not upstream): range disassembly without a function, and clearing a range.
+        // "get_disassembly" is taken upstream by get_code(format=disassembly), so the range reader is published
+        // as get_disassembly_range; its implementation class still calls itself get_disassembly.
+        tool("get_disassembly", "get_disassembly_range", "Read instructions, defined data and undefined bytes at an address range without needing a function; count defaults to 50 (max 500).").readOnly();
+        tool("clear_listing", "clear_listing", "Undefine code and data units in an inclusive address range, leaving raw bytes ready for re-disassembly or re-typing.").mutation(true, true);
         tool("get_entry_points", "list_entry_points", "List program entry-point addresses and corresponding symbols/functions.").readOnly();
 
         action("open_program", "open", "open_program", "Open a project program by exact path or unique name, launching CodeBrowser when needed. Optional analyze_after_open submits an analysis task.").parameters("name", "folder", "suppress_analysis_prompt", "analyze_after_open", "analysis_mode", "analysis_options").required("name").context(false, false).mutation(false, false);

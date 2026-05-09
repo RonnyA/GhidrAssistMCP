@@ -14,9 +14,9 @@ class RationalizedToolCatalogTest {
         try {
             var all = backend.getAllTools();
             var available = backend.getAvailableTools();
-            assertEquals(100, all.size());
-            assertEquals(93, available.size());
-            assertEquals(100, all.stream().map(McpSchema.Tool::name).distinct().count());
+            assertEquals(102, all.size());
+            assertEquals(95, available.size());
+            assertEquals(102, all.stream().map(McpSchema.Tool::name).distinct().count());
             Map<String, McpSchema.Tool> tools = available.stream().collect(Collectors.toMap(McpSchema.Tool::name, t -> t));
             Set<String> hidden = Set.of("get_code", "types", "struct", "comments", "variables", "xrefs", "classes", "bookmarks", "analysis_options", "analysis_control", "project_files", "scripts", "get_function_signature");
             assertTrue(tools.keySet().stream().noneMatch(hidden::contains));
