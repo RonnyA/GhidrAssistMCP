@@ -77,6 +77,7 @@ public class CommentsTool implements McpTool {
     public McpSchema.CallToolResult execute(Map<String, Object> arguments, Program currentProgram) {
         if (currentProgram == null) {
             return McpSchema.CallToolResult.builder()
+                .isError(true)
                 .addTextContent("No program currently loaded")
                 .build();
         }
@@ -84,6 +85,7 @@ public class CommentsTool implements McpTool {
         String action = (String) arguments.get("action");
         if (action == null || action.isEmpty()) {
             return McpSchema.CallToolResult.builder()
+                .isError(true)
                 .addTextContent("action parameter is required")
                 .build();
         }
@@ -99,6 +101,7 @@ public class CommentsTool implements McpTool {
                 return executeRemove(arguments, currentProgram);
             default:
                 return McpSchema.CallToolResult.builder()
+                    .isError(true)
                     .addTextContent("Invalid action: " + action + ". Use 'get', 'set', 'list', or 'remove'")
                     .build();
         }
@@ -113,6 +116,7 @@ public class CommentsTool implements McpTool {
             Function function = findFunctionByName(program, functionName);
             if (function == null) {
                 return McpSchema.CallToolResult.builder()
+                    .isError(true)
                     .addTextContent("Function not found: " + functionName)
                     .build();
             }
@@ -126,12 +130,14 @@ public class CommentsTool implements McpTool {
             Address address = parseAddress(program, addressStr);
             if (address == null) {
                 return McpSchema.CallToolResult.builder()
+                    .isError(true)
                     .addTextContent("Invalid address: " + addressStr)
                     .build();
             }
             CodeUnit codeUnit = program.getListing().getCodeUnitAt(address);
             if (codeUnit == null) {
                 return McpSchema.CallToolResult.builder()
+                    .isError(true)
                     .addTextContent("No code unit at address: " + addressStr)
                     .build();
             }
@@ -143,6 +149,7 @@ public class CommentsTool implements McpTool {
         }
 
         return McpSchema.CallToolResult.builder()
+            .isError(true)
             .addTextContent("Either 'address' or 'function_name' is required for get")
             .build();
     }
@@ -151,6 +158,7 @@ public class CommentsTool implements McpTool {
         String comment = (String) arguments.get("comment");
         if (comment == null) {
             return McpSchema.CallToolResult.builder()
+                .isError(true)
                 .addTextContent("comment parameter is required for set")
                 .build();
         }
@@ -162,6 +170,7 @@ public class CommentsTool implements McpTool {
             Function function = findFunctionByName(program, functionName);
             if (function == null) {
                 return McpSchema.CallToolResult.builder()
+                    .isError(true)
                     .addTextContent("Function not found: " + functionName)
                     .build();
             }
@@ -175,6 +184,7 @@ public class CommentsTool implements McpTool {
             } catch (Exception e) {
                 program.endTransaction(txId, false);
                 return McpSchema.CallToolResult.builder()
+                    .isError(true)
                     .addTextContent("Error: " + e.getMessage())
                     .build();
             }
@@ -184,12 +194,14 @@ public class CommentsTool implements McpTool {
             Address address = parseAddress(program, addressStr);
             if (address == null) {
                 return McpSchema.CallToolResult.builder()
+                    .isError(true)
                     .addTextContent("Invalid address: " + addressStr)
                     .build();
             }
             CodeUnit codeUnit = program.getListing().getCodeUnitAt(address);
             if (codeUnit == null) {
                 return McpSchema.CallToolResult.builder()
+                    .isError(true)
                     .addTextContent("No code unit at address: " + addressStr)
                     .build();
             }
@@ -204,12 +216,14 @@ public class CommentsTool implements McpTool {
             } catch (Exception e) {
                 program.endTransaction(txId, false);
                 return McpSchema.CallToolResult.builder()
+                    .isError(true)
                     .addTextContent("Error: " + e.getMessage())
                     .build();
             }
         }
 
         return McpSchema.CallToolResult.builder()
+            .isError(true)
             .addTextContent("Either 'address' or 'function_name' is required for set")
             .build();
     }
@@ -218,6 +232,7 @@ public class CommentsTool implements McpTool {
         String functionName = (String) arguments.get("function_name");
         if (functionName == null || functionName.isEmpty()) {
             return McpSchema.CallToolResult.builder()
+                .isError(true)
                 .addTextContent("function_name is required for list")
                 .build();
         }
@@ -225,6 +240,7 @@ public class CommentsTool implements McpTool {
         Function function = findFunctionByName(program, functionName);
         if (function == null) {
             return McpSchema.CallToolResult.builder()
+                .isError(true)
                 .addTextContent("Function not found: " + functionName)
                 .build();
         }
@@ -265,6 +281,7 @@ public class CommentsTool implements McpTool {
         String addressStr = (String) arguments.get("address");
         if (addressStr == null || addressStr.isEmpty()) {
             return McpSchema.CallToolResult.builder()
+                .isError(true)
                 .addTextContent("address is required for remove")
                 .build();
         }
@@ -272,6 +289,7 @@ public class CommentsTool implements McpTool {
         Address address = parseAddress(program, addressStr);
         if (address == null) {
             return McpSchema.CallToolResult.builder()
+                .isError(true)
                 .addTextContent("Invalid address: " + addressStr)
                 .build();
         }
@@ -279,6 +297,7 @@ public class CommentsTool implements McpTool {
         CodeUnit codeUnit = program.getListing().getCodeUnitAt(address);
         if (codeUnit == null) {
             return McpSchema.CallToolResult.builder()
+                .isError(true)
                 .addTextContent("No code unit at address: " + addressStr)
                 .build();
         }
@@ -294,6 +313,7 @@ public class CommentsTool implements McpTool {
         } catch (Exception e) {
             program.endTransaction(txId, false);
             return McpSchema.CallToolResult.builder()
+                .isError(true)
                 .addTextContent("Error: " + e.getMessage())
                 .build();
         }

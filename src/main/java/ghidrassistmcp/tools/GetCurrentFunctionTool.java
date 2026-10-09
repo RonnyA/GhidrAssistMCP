@@ -46,7 +46,7 @@ public class GetCurrentFunctionTool implements McpTool {
         }
 
         return McpSchema.CallToolResult.builder()
-            .addTextContent("Current function functionality requires UI context. Use get_function_by_address with specific addresses instead.")
+            .addTextContent("Current function functionality requires UI context. Use get_function_info with a function name or address instead.")
             .build();
     }
 

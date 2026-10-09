@@ -19,6 +19,25 @@ public interface McpTool {
      */
     String getName();
 
+    /** Original catalog name used to migrate persisted enable/disable settings. */
+    default String getLegacyName() { return getName(); }
+
+    /** Whether this operation accepts a selector for an already open program. */
+    default boolean supportsProgramSelection() { return true; }
+
+    /** Project create/open/save/close operations require exclusive MCP admission. */
+    default boolean isProjectLifecycleOperation() {
+        return false;
+    }
+
+    /** Whether execution needs a loaded program rather than project/server context. */
+    default boolean requiresProgramContext() { return true; }
+
+    /** Operations spanning all open programs do not require a current browser program. */
+    default boolean requiresProgramContext(Map<String, Object> arguments) {
+        return requiresProgramContext();
+    }
+
     /**
      * Get the tool description
      */
@@ -28,6 +47,9 @@ public interface McpTool {
      * Get the input schema for this tool
      */
     McpSchema.JsonSchema getInputSchema();
+
+    /** Optional machine-readable schema for structuredContent returned by this tool. */
+    default Map<String, Object> getOutputSchema() { return null; }
 
     /**
      * Execute the tool with given arguments and current program context

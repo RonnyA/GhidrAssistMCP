@@ -49,6 +49,7 @@ public class GetTaskStatusTool implements McpTool {
 
         if (taskId == null || taskId.trim().isEmpty()) {
             return McpSchema.CallToolResult.builder()
+                .isError(true)
                 .addTextContent("task_id parameter is required")
                 .build();
         }
@@ -56,6 +57,7 @@ public class GetTaskStatusTool implements McpTool {
         var taskManager = backend.getTaskManager();
         if (taskManager == null) {
             return McpSchema.CallToolResult.builder()
+                .isError(true)
                 .addTextContent("Task manager not available")
                 .build();
         }
@@ -63,6 +65,7 @@ public class GetTaskStatusTool implements McpTool {
         McpTask task = taskManager.getTask(taskId);
         if (task == null) {
             return McpSchema.CallToolResult.builder()
+                .isError(true)
                 .addTextContent("Task not found: " + taskId)
                 .build();
         }
@@ -74,6 +77,7 @@ public class GetTaskStatusTool implements McpTool {
 
         // Otherwise return status summary
         return McpSchema.CallToolResult.builder()
+            .isError(task.getStatus() == McpTask.Status.FAILED || task.getStatus() == McpTask.Status.CANCELLED)
             .addTextContent(task.toSummary())
             .build();
     }

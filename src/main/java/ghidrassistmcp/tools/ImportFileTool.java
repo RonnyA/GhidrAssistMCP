@@ -11,13 +11,11 @@ import java.io.File;
 import java.util.List;
 import java.util.Map;
 
-import ghidra.app.services.ProgramManager;
 import ghidra.app.util.importer.MessageLog;
 import ghidra.app.util.importer.ProgramLoader;
 import ghidra.app.util.opinion.BinaryLoader;
 import ghidra.app.util.opinion.LoadResults;
 import ghidra.framework.model.Project;
-import ghidra.framework.plugintool.PluginTool;
 import ghidra.program.model.address.Address;
 import ghidra.program.model.lang.CompilerSpec;
 import ghidra.program.model.lang.CompilerSpecID;
@@ -115,15 +113,9 @@ public class ImportFileTool implements McpTool {
     @Override
     public McpSchema.CallToolResult execute(Map<String, Object> arguments, Program currentProgram,
                                             GhidrAssistMCPBackend backend) {
-        // --- Resolve the PluginTool and Project ---
-        GhidrAssistMCPManager manager = GhidrAssistMCPManager.getInstance();
-        PluginTool pluginTool = manager.getActiveTool();
-        if (pluginTool == null) {
-            return textResult("No active Ghidra tool/window available.");
-        }
-
-        Project project = pluginTool.getProject();
-        if (project == null) {
+        GhidrAssistMCPManager manager = GhidrAssistMCPManager.findInstance();
+        Project project = manager == null ? null : manager.getProject();
+        if (project == null || project.isClosed()) {
             return textResult("No Ghidra project is open.");
         }
 
@@ -173,10 +165,10 @@ public class ImportFileTool implements McpTool {
             if (languageStr != null && !languageStr.isBlank()) {
                 return importWithLanguage(file, project, folderPath, languageStr, compilerStr,
                     baseAddrStr, programName, openAfterImport, suppressAnalysisPrompt,
-                    messageLog, pluginTool);
+                    messageLog, manager);
             } else {
                 return importAutoDetect(file, project, folderPath, baseAddrStr, programName,
-                    openAfterImport, suppressAnalysisPrompt, messageLog, pluginTool);
+                    openAfterImport, suppressAnalysisPrompt, messageLog, manager);
             }
         } catch (ghidra.util.exception.DuplicateNameException e) {
             return textResult("A program with that name already exists in folder '" + folderPath +
@@ -190,7 +182,7 @@ public class ImportFileTool implements McpTool {
     private McpSchema.CallToolResult importWithLanguage(File file, Project project, String folderPath,
             String languageStr, String compilerStr, String baseAddrStr, String programName,
             boolean openAfterImport, boolean suppressAnalysisPrompt, MessageLog messageLog,
-            PluginTool pluginTool) throws Exception {
+            GhidrAssistMCPManager manager) throws Exception {
 
         Language language;
         try {
@@ -236,7 +228,7 @@ public class ImportFileTool implements McpTool {
             StringBuilder result = buildResultMessage(importedProgram, folderPath, messageLog);
 
             if (openAfterImport) {
-                result.append(openInCodeBrowser(pluginTool, importedProgram, suppressAnalysisPrompt));
+                result.append(openInCodeBrowser(manager, project, importedProgram, suppressAnalysisPrompt));
             }
 
             return McpSchema.CallToolResult.builder()
@@ -247,7 +239,7 @@ public class ImportFileTool implements McpTool {
 
     private McpSchema.CallToolResult importAutoDetect(File file, Project project, String folderPath,
             String baseAddrStr, String programName, boolean openAfterImport,
-            boolean suppressAnalysisPrompt, MessageLog messageLog, PluginTool pluginTool) throws Exception {
+            boolean suppressAnalysisPrompt, MessageLog messageLog, GhidrAssistMCPManager manager) throws Exception {
 
         ProgramLoader.Builder loader = ProgramLoader.builder()
             .source(file)
@@ -273,7 +265,7 @@ public class ImportFileTool implements McpTool {
             StringBuilder result = buildResultMessage(importedProgram, folderPath, messageLog);
 
             if (openAfterImport) {
-                result.append(openInCodeBrowser(pluginTool, importedProgram, suppressAnalysisPrompt));
+                result.append(openInCodeBrowser(manager, project, importedProgram, suppressAnalysisPrompt));
             }
 
             return McpSchema.CallToolResult.builder()
@@ -308,18 +300,14 @@ public class ImportFileTool implements McpTool {
         }
     }
 
-    private static String openInCodeBrowser(PluginTool pluginTool, Program program,
-                                            boolean suppressAnalysisPrompt) {
-        ProgramManager pm = pluginTool.getService(ProgramManager.class);
-        if (pm != null) {
-            if (suppressAnalysisPrompt) {
-                AnalysisUtils.setAskToAnalyze(program, false);
-            }
-            pm.openProgram(program);
-            return "  Opened in CodeBrowser: yes\n" +
-                   "  Should Ask To Analyze: " + AnalysisUtils.shouldAskToAnalyze(program) + "\n";
+    private static String openInCodeBrowser(GhidrAssistMCPManager manager, Project project,
+                                            Program program, boolean suppressAnalysisPrompt) {
+        if (suppressAnalysisPrompt) {
+            AnalysisUtils.setAskToAnalyze(program, false);
         }
-        return "  Opened in CodeBrowser: no (ProgramManager not available)\n";
+        manager.openProgramInCodeBrowser(project, program);
+        return "  Opened in CodeBrowser: yes\n" +
+               "  Should Ask To Analyze: " + AnalysisUtils.shouldAskToAnalyze(program) + "\n";
     }
 
     private static StringBuilder buildResultMessage(Program program, String folderPath,

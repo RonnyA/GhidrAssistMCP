@@ -9,6 +9,7 @@ import java.util.concurrent.atomic.AtomicLong;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.SerializationFeature;
 
 import ghidra.program.model.listing.Program;
 import ghidra.util.Msg;
@@ -25,7 +26,8 @@ public class McpCache {
     private final Map<String, CacheEntry> cache = new ConcurrentHashMap<>();
     private final int maxEntries;
     private final long maxAgeMs;
-    private final ObjectMapper objectMapper = new ObjectMapper();
+    private final ObjectMapper objectMapper = new ObjectMapper()
+        .enable(SerializationFeature.ORDER_MAP_ENTRIES_BY_KEYS);
 
     private final AtomicLong hitCount = new AtomicLong(0);
     private final AtomicLong missCount = new AtomicLong(0);
@@ -64,12 +66,22 @@ public class McpCache {
         // Sort and serialize arguments for consistent key generation
         try {
             String argsJson = objectMapper.writeValueAsString(arguments);
-            keyBuilder.append(argsJson.hashCode());
+            keyBuilder.append(argsJson);
         } catch (JsonProcessingException e) {
             keyBuilder.append(arguments.hashCode());
         }
 
         return keyBuilder.toString();
+    }
+
+    /** Live program identity prevents collisions between equal filenames or reloads. */
+    public static String programIdentity(Program program) {
+        if (program == null) {
+            return "";
+        }
+        var file = program.getDomainFile();
+        return (file != null ? file.getFileID() + ":" + file.getPathname() : program.getName())
+            + ":" + System.identityHashCode(program);
     }
 
     /**
@@ -88,7 +100,7 @@ public class McpCache {
         }
 
         // Check if entry is still valid
-        String programName = program != null ? program.getName() : "";
+        String programName = programIdentity(program);
         long modNum = program != null ? program.getModificationNumber() : 0;
 
         if (!entry.isValid(programName, modNum)) {
@@ -127,7 +139,7 @@ public class McpCache {
             evictOldest();
         }
 
-        String programName = program != null ? program.getName() : "";
+        String programName = programIdentity(program);
         long modNum = program != null ? program.getModificationNumber() : 0;
 
         CacheEntry entry = new CacheEntry(key, result, programName, modNum);

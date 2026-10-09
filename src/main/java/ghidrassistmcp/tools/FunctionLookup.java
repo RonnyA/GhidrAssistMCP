@@ -30,13 +30,26 @@ public final class FunctionLookup {
     }
 
     /**
-     * Find a non-external function whose plain name equals {@code name}. This
+     * Find a function by address, plain name, or C++ qualified name. This
      * includes default-source thunk functions, which Ghidra intentionally omits
      * from {@link ghidra.program.model.symbol.SymbolTable#getSymbols(String)}.
      * When several functions share the name, the lowest entry point wins,
      * mirroring the address-ordered scan this method replaces.
      */
     public static Function findByName(Program program, String name) {
+        if (program == null || name == null || name.isBlank()) return null;
+        try {
+            Address address = program.getAddressFactory().getAddress(name);
+            if (address != null) {
+                Function function = program.getFunctionManager().getFunctionAt(address);
+                if (function != null) return function;
+                function = program.getFunctionManager().getFunctionContaining(address);
+                if (function != null) return function;
+            }
+        } catch (Exception ignored) {
+            // Continue through the name index when the identifier is not an address.
+        }
+        if (name.contains("::")) return findByQualifiedName(program, name);
         return new Lookup(program, name, null).find();
     }
 
@@ -46,6 +59,7 @@ public final class FunctionLookup {
      * the name index on the simple name and filtered by namespace hierarchy.
      */
     public static Function findByQualifiedName(Program program, String identifier) {
+        if (program == null || identifier == null || identifier.isBlank()) return null;
         if (identifier.contains("::")) {
             String[] parts = identifier.split("::");
             if (parts.length >= 2) {

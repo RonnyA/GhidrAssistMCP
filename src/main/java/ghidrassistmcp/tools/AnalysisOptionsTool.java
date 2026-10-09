@@ -100,6 +100,9 @@ public class AnalysisOptionsTool implements McpTool {
         if ("list_presets".equals(normalizedAction)) {
             return listPresets();
         }
+        if ("delete_preset".equals(normalizedAction)) {
+            return deletePreset(arguments);
+        }
 
         if (currentProgram == null) {
             return textResult("No program currently loaded.");

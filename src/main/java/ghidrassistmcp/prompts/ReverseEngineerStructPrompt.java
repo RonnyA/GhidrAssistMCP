@@ -30,9 +30,9 @@ public class ReverseEngineerStructPrompt implements McpPrompt {
         context.append("Reverse engineer the data structure used at address ").append(address).append(".\n\n");
 
         context.append("## Analysis Steps\n\n");
-        context.append("1. **Get Context**: Call `get_data_at` to see the raw data\n");
-        context.append("2. **Find Usage**: Call `xrefs` to find all references to this address\n");
-        context.append("3. **Get Functions**: For each referencing function, call `get_code` with format='decompile'\n");
+        context.append("1. **Get Context**: Call `get_hexdump` with address and length to see the raw data\n");
+        context.append("2. **Find Usage**: Call `get_xrefs_to` to find all references to this address\n");
+        context.append("3. **Get Functions**: For each referencing function, call `get_pseudocode`\n");
         context.append("4. **Analyze Access Patterns**: Look at how the data is accessed\n\n");
 
         context.append("## Structure Recovery\n\n");
@@ -53,7 +53,7 @@ public class ReverseEngineerStructPrompt implements McpPrompt {
         context.append("    type1 field1;    // offset 0x00 - description\n");
         context.append("    type2 field2;    // offset 0x04 - description\n");
         context.append("} StructureName;\n```\n\n");
-        context.append("Then call `types` with action='create_struct' or `struct` with action='create' to define it.\n");
+        context.append("Then call `create_structure` to define it.\n");
 
         return new McpSchema.GetPromptResult("Reverse engineer struct at " + address,
             List.of(new McpSchema.PromptMessage(McpSchema.Role.USER, new McpSchema.TextContent(context.toString()))));

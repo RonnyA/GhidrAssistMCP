@@ -1,532 +1,471 @@
-/*
- * Singleton manager for GhidrAssistMCP that coordinates multiple CodeBrowser windows.
- */
 package ghidrassistmcp;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
-import java.util.Objects;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 import ghidra.app.services.ProgramManager;
+import ghidra.framework.main.FrontEndTool;
 import ghidra.framework.model.DomainFile;
+import ghidra.framework.model.Project;
+import ghidra.framework.options.Options;
 import ghidra.framework.plugintool.PluginTool;
 import ghidra.framework.preferences.Preferences;
 import ghidra.program.model.listing.Program;
 import ghidra.util.Msg;
+import ghidra.util.SystemUtilities;
 
-/**
- * Singleton manager that coordinates the MCP server across multiple CodeBrowser windows.
- *
- * This solves the problem of multiple plugin instances each trying to start their own
- * MCP server. Instead, we have:
- * - One shared MCP backend that tracks ALL open programs across ALL tools
- * - One shared MCP server (on port 8080) that serves all requests
- * - Multiple plugin instances that register/unregister their tools
- */
-public class GhidrAssistMCPManager {
-
+/** One application runtime, independent of the number or lifetime of CodeBrowser views. */
+public final class GhidrAssistMCPManager implements McpEventListener {
     private static GhidrAssistMCPManager instance;
-    private static final Object lock = new Object();
-
+    private static final String PREFIX = "GhidrAssistMCP.";
     private final GhidrAssistMCPBackend backend;
-    private GhidrAssistMCPServer server;
-    private GhidrAssistMCPProvider provider;
-
-    // Track all registered plugin tools
+    private final McpLogModel log = new McpLogModel(2000);
     private final List<PluginTool> registeredTools = new CopyOnWriteArrayList<>();
-
-    // Track the most recently active tool (for context awareness)
+    private final Map<PluginTool, GhidrAssistMCPPlugin> plugins = new java.util.concurrent.ConcurrentHashMap<>();
+    private final Map<PluginTool, GhidrAssistMCPProvider> providers = new java.util.concurrent.ConcurrentHashMap<>();
+    private static final ExecutorService lifecycle = Executors.newSingleThreadExecutor(runnable -> {
+        Thread thread = new Thread(runnable, "GhidrAssistMCP-lifecycle");
+        thread.setDaemon(true);
+        return thread;
+    });
+    private volatile FrontEndTool frontEnd;
     private volatile PluginTool activeTool;
-
-    // Track the most recently active plugin instance (for UI context)
     private volatile GhidrAssistMCPPlugin activePlugin;
+    private volatile GhidrAssistMCPServer server;
+    private volatile String currentHost = "localhost";
+    private volatile int currentPort = 8080;
+    private volatile boolean serverEnabled = true;
+    private volatile boolean disposed;
 
-    // Server configuration
-    private String currentHost = "localhost";
-    private int currentPort = 8080;
-    private boolean serverEnabled = true;
-
-    /**
-     * Private constructor for singleton pattern.
-     */
     private GhidrAssistMCPManager() {
-        Msg.info(this, "Initializing GhidrAssistMCP Manager (singleton)");
         backend = new GhidrAssistMCPBackend();
         backend.setManager(this);
+        backend.addEventListener(this);
+        loadSettings();
     }
 
-    /**
-     * Get the singleton instance of the manager.
-     */
-    public static GhidrAssistMCPManager getInstance() {
-        if (instance == null) {
-            synchronized (lock) {
-                if (instance == null) {
-                    instance = new GhidrAssistMCPManager();
-                }
-            }
+    public static synchronized GhidrAssistMCPManager getInstance() {
+        if (instance == null || instance.disposed) {
+            instance = new GhidrAssistMCPManager();
         }
         return instance;
     }
 
-    /**
-     * Register a plugin's tool with the manager.
-     * The first tool to register will start the MCP server.
-     *
-     * @param tool The PluginTool to register
-     * @param pluginProvider The UI provider (only used from first registration)
-     * @return true if this is the first registration (server owner)
-     */
-    public synchronized boolean registerTool(PluginTool tool, GhidrAssistMCPProvider pluginProvider) {
-        if (tool == null) {
-            Msg.warn(this, "Attempted to register null tool");
-            return false;
-        }
-
-        if (registeredTools.contains(tool)) {
-            Msg.info(this, "Tool already registered: " + tool.getName());
-            return false;
-        }
-
-        registeredTools.add(tool);
-        Msg.info(this, "Registered tool: " + tool.getName() + " (total: " + registeredTools.size() + ")");
-
-        // First registration starts the server
-        if (registeredTools.size() == 1) {
-            this.provider = pluginProvider;
-
-            // Load saved configuration from Ghidra options before starting server
-            loadSettings(tool);
-
-            if (provider != null) {
-                backend.addEventListener(provider);
-                provider.onBackendReady();
-            }
-            startServer();
-            return true;
-        }
-
-        // Notify about new tool registration
-        if (provider != null) {
-            provider.logSession("New CodeBrowser registered: " + tool.getName());
-        }
-
-        return false;
+    /** Lookup without creating a GUI runtime (important for headless tools). */
+    public static synchronized GhidrAssistMCPManager findInstance() {
+        return instance;
     }
 
-    /**
-     * Unregister a plugin's tool from the manager.
-     * When all tools are unregistered, the server is stopped.
-     *
-     * @param tool The PluginTool to unregister
-     */
-    public synchronized void unregisterTool(PluginTool tool) {
-        if (tool == null) {
+    public void registerFrontEnd(FrontEndTool tool, GhidrAssistMCPProvider provider) {
+        frontEnd = tool;
+        addProvider(tool, provider);
+        onSessionEvent("Project manager attached; MCP is available before a program is opened");
+        scheduleStart();
+    }
+
+    public void unregisterFrontEnd(FrontEndTool tool) {
+        removeProvider(tool);
+        if (frontEnd == tool) {
+            frontEnd = null;
+        }
+        shutdownIfUnowned();
+    }
+
+    public boolean registerTool(PluginTool tool, GhidrAssistMCPPlugin plugin,
+                                GhidrAssistMCPProvider provider) {
+        if (tool == null || registeredTools.contains(tool)) {
+            return false;
+        }
+        registeredTools.add(tool);
+        plugins.put(tool, plugin);
+        migrateToolSettings(tool);
+        addProvider(tool, provider);
+        setActiveTool(tool);
+        onSessionEvent("CodeBrowser attached: " + tool.getName() +
+            " (" + registeredTools.size() + " browser views)");
+        scheduleStart();
+        return registeredTools.size() == 1;
+    }
+
+    public boolean isRegistered(PluginTool tool) {
+        return registeredTools.contains(tool);
+    }
+
+    public void unregisterTool(PluginTool tool) {
+        removeProvider(tool);
+        registeredTools.remove(tool);
+        GhidrAssistMCPPlugin removed = plugins.remove(tool);
+        if (activeTool == tool) {
+            activeTool = null;
+        }
+        if (activePlugin == removed) {
+            activePlugin = null;
+        }
+        onSessionEvent("CodeBrowser detached: " + tool.getName() +
+            " (" + registeredTools.size() + " browser views)");
+        shutdownIfUnowned();
+    }
+
+    private void addProvider(PluginTool tool, GhidrAssistMCPProvider provider) {
+        if (provider != null) {
+            providers.put(tool, provider);
+            provider.onBackendReady();
+        }
+    }
+
+    private void removeProvider(PluginTool tool) {
+        GhidrAssistMCPProvider provider = providers.remove(tool);
+        if (provider != null) {
+            provider.detach();
+        }
+    }
+
+    private void shutdownIfUnowned() {
+        if (frontEnd != null || !registeredTools.isEmpty()) {
             return;
         }
-
-        boolean removed = registeredTools.remove(tool);
-        if (removed) {
-            Msg.info(this, "Unregistered tool: " + tool.getName() + " (remaining: " + registeredTools.size() + ")");
-
-            if (provider != null) {
-                provider.logSession("CodeBrowser unregistered: " + tool.getName());
+        synchronized (GhidrAssistMCPManager.class) {
+            if (disposed) {
+                return;
             }
+            disposed = true;
         }
-
-        // Stop server when all tools are unregistered
-        if (registeredTools.isEmpty()) {
-            Msg.info(this, "All tools unregistered, stopping server");
+        lifecycle.execute(() -> {
             stopServer();
-
-            // Clean up singleton for potential restart
-            synchronized (lock) {
-                if (provider != null) {
-                    backend.removeEventListener(provider);
-                    provider = null;
+            backend.removeEventListener(this);
+            backend.shutdown();
+            synchronized (GhidrAssistMCPManager.class) {
+                if (instance == this) {
+                    instance = null;
                 }
-                instance = null;
             }
-        }
+        });
     }
 
-    /**
-     * Get all programs from all registered tools.
-     * This is the key method that enables multi-window support.
-     */
-    public List<Program> getAllOpenPrograms() {
-        List<Program> allPrograms = new ArrayList<>();
+    /** Automatically attached runtime views must preserve any existing tool configuration changes. */
+    static void addTransientPlugin(PluginTool tool, String pluginClass)
+            throws ghidra.framework.plugintool.util.PluginException {
+        if (!javax.swing.SwingUtilities.isEventDispatchThread()) {
+            throw new IllegalStateException("Runtime views must be attached on the Swing event thread");
+        }
+        boolean changedBefore = tool.hasConfigChanged();
+        tool.addPlugin(pluginClass);
+        tool.setConfigChanged(changedBefore);
+    }
 
-        for (PluginTool tool : registeredTools) {
-            ProgramManager pm = tool.getService(ProgramManager.class);
-            if (pm != null) {
-                Program[] programs = pm.getAllOpenPrograms();
-                if (programs != null) {
-                    for (Program p : programs) {
-                        if (!allPrograms.contains(p)) {
-                            allPrograms.add(p);
-                        }
+    public Project getProject() {
+        return SystemUtilities.runSwingNow(() -> {
+            FrontEndTool owner = frontEnd;
+            if (owner != null) {
+                return owner.getProjectManager().getActiveProject();
+            }
+            PluginTool tool = getActiveTool();
+            return tool == null ? null : tool.getProject();
+        });
+    }
+
+    /** Launch/reuse a CodeBrowser and transfer a program to its ProgramManager on the EDT. */
+    public PluginTool openProgramInCodeBrowser(Project project, Program program) {
+        return SystemUtilities.runSwingNow(() -> {
+            if (project == null || project.isClosed() || getProject() != project) {
+                throw new IllegalStateException("The Ghidra project changed before the program could be opened");
+            }
+            PluginTool browser = getActiveTool();
+            if (browser == null || browser.getProject() != project ||
+                browser.getService(ProgramManager.class) == null) {
+                browser = project.getToolServices().launchTool("CodeBrowser", List.of());
+            }
+            if (browser == null || browser.getService(ProgramManager.class) == null) {
+                throw new IllegalStateException("CodeBrowser could not be launched. Import its tool template in Ghidra.");
+            }
+            if (!isRegistered(browser)) {
+                try {
+                    addTransientPlugin(browser, GhidrAssistMCPPlugin.class.getName());
+                } catch (Exception e) {
+                    throw new IllegalStateException("Could not attach the shared MCP view", e);
+                }
+            }
+            browser.getService(ProgramManager.class).openProgram(program);
+            if (!ownsProgram(browser, program)) {
+                throw new IllegalStateException("CodeBrowser did not accept the program");
+            }
+            browser.getToolFrame().toFront();
+            return browser;
+        });
+    }
+
+    public List<Program> getAllOpenPrograms() {
+        return SystemUtilities.runSwingNow(() -> {
+            List<Program> programs = new ArrayList<>();
+            for (PluginTool tool : registeredTools) {
+                ProgramManager pm = tool.getService(ProgramManager.class);
+                if (pm == null) {
+                    continue;
+                }
+                for (Program program : pm.getAllOpenPrograms()) {
+                    if (!programs.contains(program)) {
+                        programs.add(program);
                     }
                 }
             }
-        }
-
-        return allPrograms;
+            return programs;
+        });
     }
 
-    /**
-     * Set the active tool (called when a CodeBrowser window gains focus).
-     * This helps determine which program context to use for incoming requests.
-     */
-    public synchronized void setActiveTool(PluginTool tool) {
+    public void setActiveTool(PluginTool tool) {
         if (registeredTools.contains(tool)) {
             activeTool = tool;
-            Msg.info(this, "Active tool changed: " + tool.getName());
+            activePlugin = plugins.get(tool);
+        }
+    }
 
-            if (provider != null) {
-                ProgramManager pm = tool.getService(ProgramManager.class);
-                if (pm != null) {
-                    Program current = pm.getCurrentProgram();
-                    if (current != null) {
-                        provider.logSession("Active context: " + current.getName() + " (from " + tool.getName() + ")");
-                    }
+    public PluginTool getActiveTool() {
+        PluginTool selected = activeTool;
+        if (selected != null && registeredTools.contains(selected)) {
+            return selected;
+        }
+        return registeredTools.isEmpty() ? null : registeredTools.get(0);
+    }
+
+    public PluginTool getToolForProgram(Program program) {
+        return SystemUtilities.runSwingNow(() -> {
+            PluginTool selected = getActiveTool();
+            if (ownsProgram(selected, program)) {
+                return selected;
+            }
+            for (PluginTool tool : registeredTools) {
+                if (ownsProgram(tool, program)) {
+                    return tool;
                 }
             }
-        }
-    }
-
-    /**
-     * Get the currently active tool (most recently focused CodeBrowser).
-     */
-    public PluginTool getActiveTool() {
-        return activeTool;
-    }
-
-    /**
-     * Get the CodeBrowser tool that owns the requested program. Prefer the active tool when the
-     * same program is open in more than one window so its current UI options take precedence.
-     */
-    public PluginTool getToolForProgram(Program program) {
-        if (program == null) {
             return null;
-        }
-
-        PluginTool currentActiveTool = activeTool;
-        if (ownsProgram(currentActiveTool, program)) {
-            return currentActiveTool;
-        }
-        for (PluginTool tool : registeredTools) {
-            if (ownsProgram(tool, program)) {
-                return tool;
-            }
-        }
-        return null;
+        });
     }
 
     private boolean ownsProgram(PluginTool tool, Program program) {
-        if (tool == null) {
+        if (tool == null || program == null) {
             return false;
         }
-        ProgramManager programManager = tool.getService(ProgramManager.class);
-        if (programManager == null) {
-            return false;
-        }
-        Program[] openPrograms = programManager.getAllOpenPrograms();
-        if (openPrograms == null) {
-            return false;
-        }
-        for (Program openProgram : openPrograms) {
-            if (openProgram == program) {
-                return true;
+        ProgramManager pm = tool.getService(ProgramManager.class);
+        if (pm != null) {
+            for (Program open : pm.getAllOpenPrograms()) {
+                if (open == program) {
+                    return true;
+                }
             }
         }
         return false;
     }
 
-    /**
-     * Set the active plugin instance (called when a plugin gains focus).
-     * This provides access to UI context like current address and function.
-     */
-    public synchronized void setActivePlugin(GhidrAssistMCPPlugin plugin) {
-        this.activePlugin = plugin;
+    public void setActivePlugin(GhidrAssistMCPPlugin plugin) {
+        if (plugins.containsValue(plugin)) {
+            activePlugin = plugin;
+            for (var entry : plugins.entrySet()) {
+                if (entry.getValue() == plugin) {
+                    activeTool = entry.getKey();
+                    break;
+                }
+            }
+        }
     }
 
-    /**
-     * Get the currently active plugin instance (for UI context access).
-     */
     public GhidrAssistMCPPlugin getActivePlugin() {
-        return activePlugin;
+        GhidrAssistMCPPlugin plugin = activePlugin;
+        PluginTool selected = getActiveTool();
+        return plugin != null && plugins.containsValue(plugin) ? plugin :
+            selected == null ? null : plugins.get(selected);
     }
 
-    /**
-     * Get the currently active program across all tools.
-     * Prioritizes the program from the most recently focused tool.
-     */
     public Program getCurrentProgram() {
-        // First, try the active tool if one is set
-        if (activeTool != null) {
-            ProgramManager pm = activeTool.getService(ProgramManager.class);
-            if (pm != null) {
-                Program current = pm.getCurrentProgram();
-                if (current != null) {
-                    return current;
-                }
+        return SystemUtilities.runSwingNow(() -> {
+            PluginTool selected = getActiveTool();
+            if (selected != null) {
+                ProgramManager pm = selected.getService(ProgramManager.class);
+                return pm == null ? null : pm.getCurrentProgram();
             }
-        }
-
-        // Fall back to any tool's current program
-        for (PluginTool tool : registeredTools) {
-            ProgramManager pm = tool.getService(ProgramManager.class);
-            if (pm != null) {
-                Program current = pm.getCurrentProgram();
-                if (current != null) {
-                    return current;
-                }
-            }
-        }
-        return null;
+            return null;
+        });
     }
 
-    /**
-     * Find a program by name across all registered tools.
-     */
-    public Program getProgramByName(String programName) {
-        if (programName == null || programName.trim().isEmpty()) {
+    /** Ambiguous names never select whichever browser happened to register first. */
+    public Program getProgramByName(String name) {
+        if (name == null || name.isBlank()) {
             return getCurrentProgram();
         }
-
         List<Program> programs = getAllOpenPrograms();
-
-        // Exact project path match (e.g. "/v1/app.exe" disambiguates from "/v2/app.exe")
-        for (Program p : programs) {
-            DomainFile df = p.getDomainFile();
-            if (df != null && df.getPathname().equals(programName)) {
-                return p;
+        for (int stage = 0; stage < 4; stage++) {
+            List<Program> matches = new ArrayList<>();
+            for (Program program : programs) {
+                DomainFile file = program.getDomainFile();
+                String path = file == null ? "" : file.getPathname();
+                boolean match = switch (stage) {
+                    case 0 -> path.equals(name);
+                    case 1 -> program.getName().equals(name);
+                    case 2 -> program.getName().equalsIgnoreCase(name);
+                    default -> program.getName().toLowerCase(Locale.ROOT)
+                        .contains(name.toLowerCase(Locale.ROOT));
+                };
+                if (match) {
+                    matches.add(program);
+                }
+            }
+            if (!matches.isEmpty()) {
+                if (matches.size() != 1) {
+                    throw new IllegalArgumentException("Ambiguous program: " + name +
+                        ". Use the full project path from list_open_programs.");
+                }
+                return matches.get(0);
             }
         }
-
-        // Exact name match
-        for (Program p : programs) {
-            if (p.getName().equals(programName)) {
-                return p;
-            }
-        }
-
-        // Case-insensitive match
-        for (Program p : programs) {
-            if (p.getName().equalsIgnoreCase(programName)) {
-                return p;
-            }
-        }
-
-        // Partial match
-        for (Program p : programs) {
-            if (p.getName().toLowerCase().contains(programName.toLowerCase())) {
-                return p;
-            }
-        }
-
         return null;
     }
 
-    /**
-     * Get the shared backend instance.
-     */
-    public GhidrAssistMCPBackend getBackend() {
-        return backend;
-    }
+    public GhidrAssistMCPBackend getBackend() { return backend; }
+    public McpLogModel getLog() { return log; }
+    public int getRegisteredToolCount() { return registeredTools.size(); }
+    public boolean hasFrontEndOwner() { return frontEnd != null; }
+    /** Application project owner; project controls must never use a CodeBrowser as owner. */
+    public FrontEndTool getFrontEndTool() { return frontEnd; }
+    public boolean isServerRunning() { return server != null; }
+    public String getCurrentHost() { return currentHost; }
+    public int getCurrentPort() { return currentPort; }
+    public boolean isServerEnabled() { return serverEnabled; }
 
-    /**
-     * Get the UI provider (if available).
-     */
-    public GhidrAssistMCPProvider getProvider() {
-        return provider;
-    }
-
-    /**
-     * Get the number of registered tools.
-     */
-    public int getRegisteredToolCount() {
-        return registeredTools.size();
-    }
-
-    /**
-     * Check if the server is running.
-     */
-    public boolean isServerRunning() {
-        return server != null;
-    }
-
-    /**
-     * Apply configuration changes.
-     */
     public void applyConfiguration(String host, int port, boolean enabled, boolean asyncEnabled,
                                    Map<String, Boolean> toolStates) {
-        if (provider != null) {
-            provider.logMessage("Applying configuration: " + host + ":" + port + " enabled=" + enabled + " async=" + asyncEnabled);
+        if (host == null || host.isBlank() || port < 1 || port > 65535) {
+            throw new IllegalArgumentException("A host and port between 1 and 65535 are required");
         }
-
-        boolean needsRestart = false;
-
-        if (!host.equals(currentHost) || port != currentPort) {
-            currentHost = host;
-            currentPort = port;
-            needsRestart = true;
-        }
-
-        if (enabled != serverEnabled) {
-            serverEnabled = enabled;
-            needsRestart = true;
-        }
-
-        if (server != null && toolStatesChanged(toolStates)) {
-            needsRestart = true;
-            if (provider != null) {
-                provider.logMessage("Tool availability changed; restarting MCP server to update discovery");
-            }
-        }
-
-        // Update async execution setting
-        if (backend != null) {
-            backend.setAsyncExecutionEnabled(asyncEnabled);
-        }
-
-        // Update tool states
-        if (backend != null && toolStates != null) {
+        boolean restart = !host.equals(currentHost) || port != currentPort || enabled != serverEnabled;
+        currentHost = host;
+        currentPort = port;
+        serverEnabled = enabled;
+        backend.setAsyncExecutionEnabled(asyncEnabled);
+        if (toolStates != null) {
             backend.updateToolEnabledStates(toolStates);
         }
-
-        if (needsRestart) {
-            stopServer();
-            if (serverEnabled) {
-                startServer();
-            }
+        Preferences.setProperty(PREFIX + "Server Host", host);
+        Preferences.setProperty(PREFIX + "Server Port", String.valueOf(port));
+        Preferences.setProperty(PREFIX + "Server Enabled", String.valueOf(enabled));
+        Preferences.setProperty(PREFIX + "Async Execution Enabled", String.valueOf(asyncEnabled));
+        for (var entry : backend.getToolEnabledStates().entrySet()) {
+            Preferences.setProperty(PREFIX + "Tool." + entry.getKey(), entry.getValue().toString());
         }
-
-        if (provider != null) {
-            provider.refreshToolsList();
+        Preferences.store();
+        providers.values().forEach(GhidrAssistMCPProvider::refreshConfiguration);
+        onLogMessage("Configuration saved: " + host + ":" + port + " enabled=" + enabled);
+        if (!disposed && restart) {
+            lifecycle.execute(() -> { stopServer(); startServer(); });
+        } else if (!disposed) {
+            scheduleStart();
         }
     }
 
-    /**
-     * MCP tool discovery is built when the server starts, so changed tool states
-     * require a restart before clients see the updated catalog.
-     */
-    private boolean toolStatesChanged(Map<String, Boolean> toolStates) {
-        if (backend == null || toolStates == null) {
-            return false;
-        }
-
-        Map<String, Boolean> currentStates = backend.getToolEnabledStates();
-        for (Map.Entry<String, Boolean> entry : toolStates.entrySet()) {
-            String toolName = entry.getKey();
-            if (currentStates.containsKey(toolName) &&
-                !Objects.equals(currentStates.get(toolName), entry.getValue())) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    /**
-     * Get current configuration.
-     */
-    public String getCurrentHost() {
-        return currentHost;
-    }
-
-    public int getCurrentPort() {
-        return currentPort;
-    }
-
-    public boolean isServerEnabled() {
-        return serverEnabled;
-    }
-
-    /**
-     * Load settings from Ghidra's global Preferences.
-     * Called when the first tool registers to ensure saved configuration is used.
-     */
-    private void loadSettings(PluginTool tool) {
-        // Load from Ghidra's global Preferences
-        currentHost = Preferences.getProperty("GhidrAssistMCP.Server Host", "localhost");
-        String portStr = Preferences.getProperty("GhidrAssistMCP.Server Port", "8080");
-        String enabledStr = Preferences.getProperty("GhidrAssistMCP.Server Enabled", "true");
-        String asyncEnabledStr = Preferences.getProperty("GhidrAssistMCP.Async Execution Enabled", "true");
-
+    private void loadSettings() {
+        currentHost = Preferences.getProperty(PREFIX + "Server Host", "localhost");
         try {
-            currentPort = Integer.parseInt(portStr);
-            serverEnabled = Boolean.parseBoolean(enabledStr);
+            currentPort = Integer.parseInt(Preferences.getProperty(PREFIX + "Server Port", "8080"));
+            if (currentPort < 1 || currentPort > 65535) {
+                currentPort = 8080;
+            }
         } catch (NumberFormatException e) {
-            Msg.warn(this, "Failed to parse preferences, using defaults: " + e.getMessage());
             currentPort = 8080;
-            serverEnabled = true;
         }
+        serverEnabled = Boolean.parseBoolean(Preferences.getProperty(PREFIX + "Server Enabled", "true"));
+        backend.setAsyncExecutionEnabled(Boolean.parseBoolean(
+            Preferences.getProperty(PREFIX + "Async Execution Enabled", "true")));
+        Map<String, Boolean> states = new HashMap<>(backend.getToolEnabledStates());
+        Map<String, String> legacyNames = backend.getToolLegacyNames();
+        states.replaceAll((name, value) -> {
+            String saved = Preferences.getProperty(PREFIX + "Tool." + name);
+            if (saved == null) {
+                saved = Preferences.getProperty(PREFIX + "Tool." + legacyNames.getOrDefault(name, name));
+            }
+            return saved == null ? value : Boolean.parseBoolean(saved);
+        });
+        backend.updateToolEnabledStates(states);
+    }
 
-        boolean asyncEnabled = Boolean.parseBoolean(asyncEnabledStr);
-        if (backend != null) {
-            backend.setAsyncExecutionEnabled(asyncEnabled);
+    /** Migrate saved CodeBrowser options once, preserving each backend default. */
+    private void migrateToolSettings(PluginTool tool) {
+        Options options = tool.getOptions("GhidrAssistMCP");
+        Map<String, Boolean> states = new HashMap<>(backend.getToolEnabledStates());
+        Map<String, String> legacyNames = backend.getToolLegacyNames();
+        boolean migrated = false;
+        for (String name : states.keySet()) {
+            if (Preferences.getProperty(PREFIX + "Tool." + name) != null) {
+                continue;
+            }
+            String oldName = legacyNames.getOrDefault(name, name);
+            String saved = Preferences.getProperty(PREFIX + "Tool." + oldName);
+            String option = options.contains("Tool." + name) ? name : oldName;
+            boolean enabled = states.get(name);
+            if (saved != null) {
+                enabled = Boolean.parseBoolean(saved);
+            } else if (options.contains("Tool." + option)) {
+                enabled = options.getBoolean("Tool." + option, enabled);
+            } else {
+                continue;
+            }
+            states.put(name, enabled);
+            Preferences.setProperty(PREFIX + "Tool." + name, String.valueOf(enabled));
+            migrated = true;
         }
-
-        Msg.info(this, "Loaded settings from Ghidra preferences: " + currentHost + ":" + currentPort + " enabled=" + serverEnabled + " async=" + asyncEnabled);
-
-        if (provider != null) {
-            provider.logMessage("Loaded configuration: " + currentHost + ":" + currentPort + " enabled=" + serverEnabled + " async=" + asyncEnabled);
+        if (migrated) {
+            backend.updateToolEnabledStates(states);
+            Preferences.store();
+            providers.values().forEach(GhidrAssistMCPProvider::refreshConfiguration);
         }
     }
 
-    /**
-     * Start the MCP server.
-     */
+    private void scheduleStart() {
+        if (!disposed) {
+            lifecycle.execute(this::startServer);
+        }
+    }
+
     private void startServer() {
-        if (!serverEnabled) {
-            if (provider != null) {
-                provider.logSession("Server disabled - not starting");
-            }
+        if (disposed || !serverEnabled || server != null) {
             return;
         }
-
-        if (server != null) {
-            Msg.info(this, "Server already running");
-            return;
-        }
-
+        GhidrAssistMCPServer candidate = new GhidrAssistMCPServer(currentHost, currentPort, backend, null);
         try {
-            server = new GhidrAssistMCPServer(currentHost, currentPort, backend, provider);
-            server.start();
-            if (provider != null) {
-                provider.logSession("Server started on " + currentHost + ":" + currentPort);
-            }
-            Msg.info(this, "MCP Server started on port " + currentPort);
+            candidate.start();
+            server = candidate;
+            onSessionEvent("Server started on " + currentHost + ":" + currentPort);
         } catch (Exception e) {
-            if (provider != null) {
-                provider.logSession("Failed to start server: " + e.getMessage());
-            }
-            Msg.error(this, "Failed to start MCP Server", e);
-            server = null;
+            try { candidate.stop(); } catch (Exception ignored) { /* best effort after failed start */ }
+            onSessionEvent("Server startup failed: " + e.getMessage());
+            Msg.error(this, "Failed to start MCP server", e);
         }
     }
 
-    /**
-     * Stop the MCP server.
-     */
     private void stopServer() {
-        if (server != null) {
+        GhidrAssistMCPServer current = server;
+        server = null;
+        if (current != null) {
             try {
-                server.stop();
-                if (provider != null) {
-                    provider.logSession("Server stopped");
-                }
-                Msg.info(this, "MCP Server stopped");
+                current.stop();
+                onSessionEvent("Server stopped");
             } catch (Exception e) {
-                if (provider != null) {
-                    provider.logSession("Error stopping server: " + e.getMessage());
-                }
-                Msg.error(this, "Failed to stop MCP Server", e);
+                Msg.error(this, "Failed to stop MCP server", e);
+                onSessionEvent("Server shutdown failed: " + e.getMessage());
             }
-            server = null;
         }
     }
+
+    @Override public void onToolRequest(String name, String parameters) {
+        log.append("REQ: " + name + " " + McpLogModel.abbreviate(parameters));
+    }
+    @Override public void onToolResponse(String name, String response) {
+        log.append("RES: " + name + " " + McpLogModel.abbreviate(response));
+    }
+    @Override public void onSessionEvent(String event) { log.append("SESSION: " + event); }
+    @Override public void onLogMessage(String message) { log.append(message); }
 }

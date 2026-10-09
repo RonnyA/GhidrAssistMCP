@@ -1,440 +1,166 @@
-/* 
- * 
- */
 package ghidrassistmcp;
 
-import java.awt.*;
-import java.awt.event.ActionEvent;
-import java.awt.event.ActionListener;
-import java.awt.event.FocusEvent;
-import java.awt.event.FocusListener;
-import java.text.SimpleDateFormat;
-import java.util.Date;
+import java.awt.BorderLayout;
+import java.awt.FlowLayout;
+import java.awt.GridLayout;
+import java.awt.Font;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.function.Consumer;
 
-import javax.swing.*;
+import javax.swing.JButton;
+import javax.swing.JCheckBox;
+import javax.swing.JComponent;
+import javax.swing.JLabel;
+import javax.swing.JPanel;
+import javax.swing.JScrollPane;
+import javax.swing.JSpinner;
+import javax.swing.JTabbedPane;
+import javax.swing.JTable;
+import javax.swing.JTextArea;
+import javax.swing.JTextField;
+import javax.swing.SpinnerNumberModel;
+import javax.swing.SwingUtilities;
 import javax.swing.table.DefaultTableModel;
 
-import docking.ActionContext;
 import docking.ComponentProvider;
-import docking.action.DockingAction;
-import docking.action.ToolBarData;
-import ghidra.framework.options.Options;
 import ghidra.framework.plugintool.PluginTool;
-import ghidra.framework.preferences.Preferences;
 import ghidra.util.HelpLocation;
-import resources.Icons;
 
-/**
- * UI Provider for the GhidrAssistMCP plugin featuring configuration and logging tabs.
- */
-public class GhidrAssistMCPProvider extends ComponentProvider implements McpEventListener {
-    
-    private static final String NAME = "GhidrAssistMCP";
-    private static final String OWNER = "GhidrAssistMCPPlugin";
-    
-    // Settings constants
-    private static final String SETTINGS_CATEGORY = "GhidrAssistMCP";
-    private static final String HOST_SETTING = "Server Host";
-    private static final String PORT_SETTING = "Server Port";
-    private static final String ENABLED_SETTING = "Server Enabled";
-    private static final String ASYNC_ENABLED_SETTING = "Async Execution Enabled";
-    private static final String TOOL_PREFIX = "Tool.";
-    
-    // Default values
-    private static final String DEFAULT_HOST = "localhost";
-    private static final int DEFAULT_PORT = 8080;
-    private static final boolean DEFAULT_ENABLED = true;
-    private static final boolean DEFAULT_ASYNC_ENABLED = true;
-    
-    private final PluginTool tool;
-    private final GhidrAssistMCPPlugin plugin;
-    private JTabbedPane tabbedPane;
-    
-    // Configuration tab components
-    private JTextField hostField;
-    private JSpinner portSpinner;
-    private JCheckBox enabledCheckBox;
-    private JCheckBox asyncEnabledCheckBox;
-    private JTable toolsTable;
-    private DefaultTableModel toolsTableModel;
-    private JButton saveButton;
-    private Map<String, Boolean> toolEnabledStates;
-    
-    // Log tab components
-    private JTextArea logTextArea;
-    private JButton clearButton;
-    private SimpleDateFormat dateFormat;
-    
-    public GhidrAssistMCPProvider(PluginTool tool, GhidrAssistMCPPlugin plugin) {
-        super(tool, NAME, OWNER);
-        this.tool = tool;
-        this.plugin = plugin;
-        this.toolEnabledStates = new HashMap<>();
-        this.dateFormat = new SimpleDateFormat("HH:mm:ss");
-        
+/** Per-window view of the shared application configuration and request log. */
+public final class GhidrAssistMCPProvider extends ComponentProvider {
+    private final GhidrAssistMCPManager manager;
+    private final JTabbedPane tabs = new JTabbedPane();
+    private final JTextField host = new JTextField(20);
+    private final JSpinner port = new JSpinner(new SpinnerNumberModel(8080, 1, 65535, 1));
+    private final JCheckBox enabled = new JCheckBox("Enable MCP Server");
+    private final JCheckBox async = new JCheckBox("Enable async tool execution");
+    private final DefaultTableModel tableModel = new DefaultTableModel(
+        new String[]{"Enabled", "Tool Name", "Description"}, 0) {
+        @Override public Class<?> getColumnClass(int column) {
+            return column == 0 ? Boolean.class : String.class;
+        }
+        @Override public boolean isCellEditable(int row, int column) { return column == 0; }
+    };
+    private final JTable tools = new JTable(tableModel);
+    private final JTextArea log = new JTextArea(20, 60);
+    private volatile boolean detached;
+    private final Consumer<String> logListener = snapshot -> SwingUtilities.invokeLater(() -> {
+        if (!detached) {
+            log.setText(snapshot);
+            log.setCaretPosition(log.getDocument().getLength());
+        }
+    });
+    private boolean subscribed;
+
+    public GhidrAssistMCPProvider(PluginTool tool, GhidrAssistMCPManager manager) {
+        super(tool, "GhidrAssistMCP", "GhidrAssistMCPPlugin");
+        this.manager = manager;
         buildComponent();
-        createActions();
-        // Don't load settings yet - wait for backend to be ready
-        
         setHelpLocation(new HelpLocation("GhidrAssistMCP", "GhidrAssistMCP_Provider"));
-        setVisible(true);
-        
-        // Add focus listener to refresh tools when window receives focus
-        addFocusListener();
     }
-    
+
     private void buildComponent() {
-        tabbedPane = new JTabbedPane();
-        
-        // Configuration tab
-        JPanel configPanel = createConfigurationPanel();
-        tabbedPane.addTab("Configuration", configPanel);
-        
-        // Log tab
-        JPanel logPanel = createLogPanel();
-        tabbedPane.addTab("Log", logPanel);
-        
-        // Component will be returned by getComponent() method
-    }
-    
-    private JPanel createConfigurationPanel() {
-        JPanel panel = new JPanel(new BorderLayout());
-        
-        // Server settings panel
-        JPanel serverPanel = new JPanel(new GridBagLayout());
-        serverPanel.setBorder(BorderFactory.createTitledBorder("Server Settings"));
-        GridBagConstraints gbc = new GridBagConstraints();
-        
-        // Host setting
-        gbc.gridx = 0; gbc.gridy = 0; gbc.anchor = GridBagConstraints.WEST;
-        serverPanel.add(new JLabel("Host:"), gbc);
-        gbc.gridx = 1; gbc.fill = GridBagConstraints.HORIZONTAL; gbc.weightx = 1.0;
-        hostField = new JTextField(DEFAULT_HOST, 20);
-        serverPanel.add(hostField, gbc);
-        
-        // Port setting
-        gbc.gridx = 0; gbc.gridy = 1; gbc.fill = GridBagConstraints.NONE; gbc.weightx = 0;
-        serverPanel.add(new JLabel("Port:"), gbc);
-        gbc.gridx = 1; gbc.fill = GridBagConstraints.HORIZONTAL; gbc.weightx = 1.0;
-        portSpinner = new JSpinner(new SpinnerNumberModel(DEFAULT_PORT, 1, 65535, 1));
-        serverPanel.add(portSpinner, gbc);
-        
-        // Enabled setting
-        gbc.gridx = 0; gbc.gridy = 2; gbc.gridwidth = 2; gbc.fill = GridBagConstraints.NONE;
-        enabledCheckBox = new JCheckBox("Enable MCP Server", DEFAULT_ENABLED);
-        serverPanel.add(enabledCheckBox, gbc);
-        
-        // Async execution setting
-        gbc.gridy = 3;
-        asyncEnabledCheckBox = new JCheckBox("Enable async tool execution", DEFAULT_ASYNC_ENABLED);
-        asyncEnabledCheckBox.setToolTipText("When enabled, long-running tools execute asynchronously and return a task ID. When disabled, all tools execute synchronously.");
-        serverPanel.add(asyncEnabledCheckBox, gbc);
-        
-        panel.add(serverPanel, BorderLayout.NORTH);
-        
-        // Tools panel
-        JPanel toolsPanel = new JPanel(new BorderLayout());
-        toolsPanel.setBorder(BorderFactory.createTitledBorder("MCP Tools"));
-        
-        // Tools table
-        String[] columnNames = {"Enabled", "Tool Name", "Description"};
-        toolsTableModel = new DefaultTableModel(columnNames, 0) {
-            @Override
-            public Class<?> getColumnClass(int column) {
-                return column == 0 ? Boolean.class : String.class;
-            }
-            
-            @Override
-            public boolean isCellEditable(int row, int column) {
-                return column == 0; // Only the checkbox column is editable
-            }
-        };
-        
-        toolsTable = new JTable(toolsTableModel);
-        toolsTable.getColumnModel().getColumn(0).setMaxWidth(60);
-        toolsTable.getColumnModel().getColumn(1).setPreferredWidth(150);
-        toolsTable.getColumnModel().getColumn(2).setPreferredWidth(300);
-        
-        JScrollPane scrollPane = new JScrollPane(toolsTable);
-        scrollPane.setPreferredSize(new Dimension(500, 200));
-        toolsPanel.add(scrollPane, BorderLayout.CENTER);
-        
-        panel.add(toolsPanel, BorderLayout.CENTER);
-        
-        // Save button
-        JPanel buttonPanel = new JPanel(new FlowLayout(FlowLayout.RIGHT));
-        saveButton = new JButton("Save Configuration");
-        saveButton.addActionListener(new SaveConfigurationListener());
-        buttonPanel.add(saveButton);
-        
-        panel.add(buttonPanel, BorderLayout.SOUTH);
-        
-        return panel;
-    }
-    
-    private JPanel createLogPanel() {
-        JPanel panel = new JPanel(new BorderLayout());
-        
-        // Log text area
-        logTextArea = new JTextArea(20, 60);
-        logTextArea.setEditable(false);
-        logTextArea.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 12));
-        logTextArea.setBackground(Color.BLACK);
-        logTextArea.setForeground(Color.GREEN);
-        JScrollPane scrollPane = new JScrollPane(logTextArea);
-        scrollPane.setVerticalScrollBarPolicy(ScrollPaneConstants.VERTICAL_SCROLLBAR_ALWAYS);
-        
-        panel.add(scrollPane, BorderLayout.CENTER);
-        
-        // Clear button
-        JPanel buttonPanel = new JPanel(new FlowLayout(FlowLayout.RIGHT));
-        clearButton = new JButton("Clear Log");
-        clearButton.addActionListener(e -> clearLog());
-        buttonPanel.add(clearButton);
-        
-        panel.add(buttonPanel, BorderLayout.SOUTH);
-        
-        return panel;
-    }
-    
-    private void createActions() {
-        DockingAction refreshAction = new DockingAction("Refresh", OWNER) {
-            @Override
-            public void actionPerformed(ActionContext context) {
-                refreshToolsList();
-            }
-        };
-        refreshAction.setToolBarData(new ToolBarData(Icons.REFRESH_ICON, null));
-        refreshAction.setDescription("Refresh tools list");
-        refreshAction.setHelpLocation(new HelpLocation("GhidrAssistMCP", "Refresh"));
-        
-        addLocalAction(refreshAction);
-    }
-    
-    private void addFocusListener() {
-        // Add focus listener to the main component to refresh tools when window receives focus
-        tabbedPane.addFocusListener(new FocusListener() {
-            @Override
-            public void focusGained(FocusEvent e) {
-                // Notify manager that this tool's window gained focus
-                if (plugin != null && plugin.getManager() != null) {
-                    plugin.getManager().setActiveTool(tool);
-                }
-                // Refresh tools list when the window receives focus
-                refreshToolsList();
-            }
+        JPanel configuration = new JPanel(new BorderLayout(8, 8));
+        JPanel settings = new JPanel(new GridLayout(3, 2, 8, 8));
+        settings.add(new JLabel("Host:"));
+        settings.add(host);
+        settings.add(new JLabel("Port:"));
+        settings.add(port);
+        settings.add(enabled);
+        settings.add(async);
+        async.setToolTipText("Long-running tools return a task ID when enabled.");
+        configuration.add(settings, BorderLayout.NORTH);
+        tools.getColumnModel().getColumn(0).setMaxWidth(65);
+        tools.getColumnModel().getColumn(1).setPreferredWidth(180);
+        tools.getColumnModel().getColumn(2).setPreferredWidth(480);
+        tools.setAutoCreateRowSorter(true);
+        configuration.add(new JScrollPane(tools), BorderLayout.CENTER);
+        JPanel buttons = new JPanel(new FlowLayout(FlowLayout.RIGHT));
+        JButton refresh = new JButton("Refresh");
+        refresh.addActionListener(event -> refreshConfiguration());
+        JButton save = new JButton("Save Configuration");
+        save.addActionListener(event -> saveSettings());
+        buttons.add(refresh);
+        buttons.add(save);
+        configuration.add(buttons, BorderLayout.SOUTH);
+        tabs.addTab("Configuration", configuration);
 
-            @Override
-            public void focusLost(FocusEvent e) {
-                // No action needed when focus is lost
-            }
-        });
+        JPanel logPanel = new JPanel(new BorderLayout());
+        log.setEditable(false);
+        log.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 12));
+        logPanel.add(new JScrollPane(log), BorderLayout.CENTER);
+        JPanel logButtons = new JPanel(new FlowLayout(FlowLayout.RIGHT));
+        JButton clear = new JButton("Clear Shared Log");
+        clear.addActionListener(event -> manager.getLog().clear());
+        logButtons.add(clear);
+        logPanel.add(logButtons, BorderLayout.SOUTH);
+        tabs.addTab("Log", logPanel);
     }
-    
-    public void refreshToolsList() {
-        // Clear existing rows
-        toolsTableModel.setRowCount(0);
-        
-        // Get tools from backend
-        if (plugin != null && plugin.getBackend() != null) {
-            try {
-                // Get all tools (including disabled ones) for configuration display
-                var tools = plugin.getBackend().getAllTools();
-                
-                // Sync enabled states with backend
-                var backendStates = plugin.getBackend().getToolEnabledStates();
-                toolEnabledStates.putAll(backendStates);
-                
-                for (var tool1 : tools) {
-                    String toolName = tool1.name();
-                    boolean enabled = toolEnabledStates.getOrDefault(toolName, true);
-                    String description = tool1.description();
-                    
-                    // Truncate long descriptions
-                    if (description != null && description.length() > 80) {
-                        description = description.substring(0, 77) + "...";
-                    }
-                    
-                    toolsTableModel.addRow(new Object[]{enabled, toolName, description});
-                }
-                logMessage("Refreshed tools list: " + tools.size() + " tools available");
-            } catch (Exception e) {
-                logMessage("Error refreshing tools list: " + e.getMessage());
-            }
-        } else {
-            logMessage("Backend not available yet - tools list empty");
-        }
-    }
-    
-    private void loadSettings() {
-        // Load server settings from Ghidra's global preferences
-        String host = Preferences.getProperty(SETTINGS_CATEGORY + "." + HOST_SETTING, DEFAULT_HOST);
-        String portStr = Preferences.getProperty(SETTINGS_CATEGORY + "." + PORT_SETTING, String.valueOf(DEFAULT_PORT));
-        String enabledStr = Preferences.getProperty(SETTINGS_CATEGORY + "." + ENABLED_SETTING, String.valueOf(DEFAULT_ENABLED));
-        String asyncEnabledStr = Preferences.getProperty(SETTINGS_CATEGORY + "." + ASYNC_ENABLED_SETTING, String.valueOf(DEFAULT_ASYNC_ENABLED));
 
-        int port = DEFAULT_PORT;
-        boolean enabled = DEFAULT_ENABLED;
-        boolean asyncEnabled = DEFAULT_ASYNC_ENABLED;
-        try {
-            port = Integer.parseInt(portStr);
-            enabled = Boolean.parseBoolean(enabledStr);
-            asyncEnabled = Boolean.parseBoolean(asyncEnabledStr);
-        } catch (NumberFormatException e) {
-            logMessage("Warning: Failed to parse preferences, using defaults");
-        }
-
-        hostField.setText(host);
-        portSpinner.setValue(port);
-        enabledCheckBox.setSelected(enabled);
-        asyncEnabledCheckBox.setSelected(asyncEnabled);
-
-        // Load tool enabled states from tool options
-        Options options = tool.getOptions(SETTINGS_CATEGORY);
-
-        toolEnabledStates.clear();
-        if (plugin != null && plugin.getBackend() != null) {
-            try {
-                var tools = plugin.getBackend().getAllTools();
-                int loadedCount = 0;
-                for (var tool1 : tools) {
-                    String toolName = tool1.name();
-                    boolean toolEnabled = options.getBoolean(TOOL_PREFIX + toolName, true);
-                    toolEnabledStates.put(toolName, toolEnabled);
-                    loadedCount++;
-                }
-                // Update backend with loaded settings
-                plugin.getBackend().updateToolEnabledStates(toolEnabledStates);
-                logMessage("Loaded tool states from settings: " + loadedCount + " tools configured");
-            } catch (Exception e) {
-                logMessage("Error loading tool states: " + e.getMessage());
-            }
-        } else {
-            logMessage("Backend not available - skipping tool state loading");
-        }
-    }
-    
     private void saveSettings() {
-        // Save server settings to Ghidra's global preferences
-        Preferences.setProperty(SETTINGS_CATEGORY + "." + HOST_SETTING, hostField.getText());
-        Preferences.setProperty(SETTINGS_CATEGORY + "." + PORT_SETTING, String.valueOf(portSpinner.getValue()));
-        Preferences.setProperty(SETTINGS_CATEGORY + "." + ENABLED_SETTING, String.valueOf(enabledCheckBox.isSelected()));
-        Preferences.setProperty(SETTINGS_CATEGORY + "." + ASYNC_ENABLED_SETTING, String.valueOf(asyncEnabledCheckBox.isSelected()));
-
-        // Force preferences to be saved to disk
-        Preferences.store();
-
-        // Save tool enabled states to tool options
-        Options options = tool.getOptions(SETTINGS_CATEGORY);
-        int savedCount = 0;
-        for (int i = 0; i < toolsTableModel.getRowCount(); i++) {
-            String toolName = (String) toolsTableModel.getValueAt(i, 1);
-            boolean enabled = (Boolean) toolsTableModel.getValueAt(i, 0);
-            toolEnabledStates.put(toolName, enabled);
-            options.setBoolean(TOOL_PREFIX + toolName, enabled);
-            savedCount++;
+        if (tools.isEditing() && !tools.getCellEditor().stopCellEditing()) {
+            return;
         }
-        
-        logMessage("Saved configuration to Ghidra options: server + " + savedCount + " tools");
-
-        // Apply changes to the plugin
-        plugin.applyConfiguration(hostField.getText(), (Integer) portSpinner.getValue(),
-                                enabledCheckBox.isSelected(), asyncEnabledCheckBox.isSelected(),
-                                toolEnabledStates);
+        Map<String, Boolean> states = new HashMap<>();
+        for (int row = 0; row < tableModel.getRowCount(); row++) {
+            states.put((String) tableModel.getValueAt(row, 1),
+                (Boolean) tableModel.getValueAt(row, 0));
+        }
+        try {
+            manager.applyConfiguration(host.getText().trim(), (Integer) port.getValue(),
+                enabled.isSelected(), async.isSelected(), states);
+        } catch (IllegalArgumentException e) {
+            manager.onLogMessage("Configuration not saved: " + e.getMessage());
+        }
     }
-    
-    public void logMessage(String message) {
+
+    public void onBackendReady() {
+        if (!subscribed) {
+            subscribed = true;
+            manager.getLog().subscribe(logListener);
+        }
+        refreshConfiguration();
+    }
+
+    public void refreshConfiguration() {
         SwingUtilities.invokeLater(() -> {
-            String timestamp = dateFormat.format(new Date());
-            String logEntry = "[" + timestamp + "] " + message + "\n";
-            logTextArea.append(logEntry);
-            logTextArea.setCaretPosition(logTextArea.getDocument().getLength());
+            if (detached) {
+                return;
+            }
+            host.setText(manager.getCurrentHost());
+            port.setValue(manager.getCurrentPort());
+            enabled.setSelected(manager.isServerEnabled());
+            async.setSelected(manager.getBackend().isAsyncExecutionEnabled());
+            refreshToolsList();
         });
     }
-    
-    public void logRequest(String method, String params) {
-        String truncatedParams = params.length() > 60 ? params.substring(0, 77) + "..." : params;
-        logMessage("REQ: " + method + " " + truncatedParams.replace("\n", "\\n"));
+
+    public void refreshToolsList() {
+        if (!SwingUtilities.isEventDispatchThread()) {
+            SwingUtilities.invokeLater(this::refreshToolsList);
+            return;
+        }
+        if (detached) {
+            return;
+        }
+        tableModel.setRowCount(0);
+        Map<String, Boolean> states = manager.getBackend().getToolEnabledStates();
+        manager.getBackend().getAllTools().stream()
+            .sorted(java.util.Comparator.comparing(tool -> tool.name()))
+            .forEach(tool -> tableModel.addRow(new Object[]{
+                states.getOrDefault(tool.name(), false), tool.name(), tool.description()}));
     }
-    
-    public void logResponse(String method, String response) {
-        String truncatedResponse = response.length() > 60 ? response.substring(0, 77) + "..." : response;
-        logMessage("RES: " + method + " " + truncatedResponse.replace("\n", "\\n"));
-    }
-    
-    public void logSession(String event) {
-        logMessage("SESSION: " + event);
-    }
-    
-    private void clearLog() {
-        logTextArea.setText("");
-    }
-    
-    // Add the required getComponent method
-    @Override
-    public JComponent getComponent() {
-        return tabbedPane;
-    }
-    
-    private class SaveConfigurationListener implements ActionListener {
-        @Override
-        public void actionPerformed(ActionEvent e) {
-            saveSettings();
-            logMessage("Configuration saved");
+
+    public void detach() {
+        detached = true;
+        if (subscribed) {
+            manager.getLog().unsubscribe(logListener);
+            subscribed = false;
         }
     }
-    
-    // Getters for current configuration
-    public String getHost() {
-        return hostField.getText();
-    }
-    
-    public int getPort() {
-        return (Integer) portSpinner.getValue();
-    }
-    
-    public boolean isServerEnabled() {
-        return enabledCheckBox.isSelected();
-    }
-    
-    public boolean isAsyncEnabled() {
-        return asyncEnabledCheckBox.isSelected();
-    }
-    
-    public Map<String, Boolean> getToolEnabledStates() {
-        return new HashMap<>(toolEnabledStates);
-    }
-    
-    /**
-     * Public method to refresh tools list - can be called when backend becomes available
-     */
-    public void onBackendReady() {
-        // Load settings now that backend is ready
-        loadSettings();
-        refreshToolsList();
-        logMessage("Backend ready - settings loaded and tools list refreshed");
-    }
-    
-    // McpEventListener implementation
-    @Override
-    public void onToolRequest(String toolName, String parameters) {
-        logRequest(toolName, parameters);
-    }
-    
-    @Override
-    public void onToolResponse(String toolName, String response) {
-        logResponse(toolName, response);
-    }
-    
-    @Override
-    public void onSessionEvent(String event) {
-        logSession(event);
-    }
-    
-    @Override
-    public void onLogMessage(String message) {
-        logMessage(message);
-    }
+
+    public void logMessage(String message) { manager.onLogMessage(message); }
+    public void logSession(String message) { manager.onSessionEvent(message); }
+    @Override public JComponent getComponent() { return tabs; }
 }

@@ -1,3 +1,7 @@
+plugins {
+    id 'com.gradleup.shadow' version '9.6.1'
+}
+
 /* 
  *
  */
@@ -43,29 +47,114 @@ task distributeExtension {
 }
 //----------------------END "DO NOT MODIFY" SECTION-------------------------------
 
+// Product release version; extension.properties retains Ghidra's compatibility version.
+version = '3.0.0'
+tasks.withType(Jar).configureEach {
+    manifest {
+        attributes 'Implementation-Title': project.name,
+            'Implementation-Version': project.version.toString()
+    }
+}
+
+// Historical generated jars must not shadow the pinned dependency set.
+configurations.api.dependencies.removeAll { dependency ->
+    dependency instanceof org.gradle.api.artifacts.FileCollectionDependency &&
+        dependency.files.files.any { it.parentFile.canonicalFile == file('lib').canonicalFile }
+}
+tasks.named('copyDependencies') {
+    enabled = false
+}
+
+// Ghidra shares a classloader across extensions and ships older Jackson libraries.
+// Compile against public dependency APIs, then isolate the complete runtime in the
+// distributed jar so both host libraries and other MCP plugins can coexist.
+configurations {
+    isolatedRuntime {
+        canBeConsumed = false
+        canBeResolved = true
+    }
+}
+tasks.named('jar') {
+    archiveClassifier = 'unshaded'
+}
+tasks.named('shadowJar', com.github.jengelman.gradle.plugins.shadow.tasks.ShadowJar) {
+    archiveClassifier = ''
+    configurations = [project.configurations.isolatedRuntime]
+    filesMatching('META-INF/services/**') { duplicatesStrategy = DuplicatesStrategy.INCLUDE }
+    mergeServiceFiles()
+    relocate 'io.modelcontextprotocol', 'ghidrassistmcp.internal.mcp'
+    relocate 'com.fasterxml.jackson', 'ghidrassistmcp.internal.jackson2'
+    relocate 'com.networknt', 'ghidrassistmcp.internal.networknt'
+    relocate 'com.ethlo', 'ghidrassistmcp.internal.ethlo'
+    relocate 'org.yaml.snakeyaml', 'ghidrassistmcp.internal.snakeyaml'
+    relocate 'org.eclipse.jetty', 'ghidrassistmcp.internal.jetty'
+    relocate 'jakarta.servlet', 'ghidrassistmcp.internal.servlet'
+    relocate 'reactor', 'ghidrassistmcp.internal.reactor'
+    relocate 'org.reactivestreams', 'ghidrassistmcp.internal.reactivestreams'
+    relocate 'org.slf4j', 'ghidrassistmcp.internal.slf4j'
+    exclude 'META-INF/*.SF', 'META-INF/*.RSA', 'META-INF/*.DSA', 'META-INF/*.EC'
+    exclude 'module-info.class', 'META-INF/versions/**/module-info.class'
+}
+tasks.named('buildExtension', Zip) {
+    archiveVersion = project.version.toString()
+    dependsOn tasks.named('shadowJar')
+    exclude 'lib/*.jar'
+    exclude '**/*-unshaded.jar'
+    // Local analysis state and editor preferences are never extension assets.
+    exclude '.claude/**', 'lucene/**', 'ghidrassist_*.db*'
+    // Unused language-provider scaffolding from the extension template.
+    exclude 'data/languages/skel.*', 'data/buildLanguage.xml', 'data/sleighArgs.txt'
+    from(tasks.named('shadowJar')) {
+        into "${project.name}/lib"
+    }
+}
+
 repositories {
 	mavenCentral()
 }
 
 dependencies {
-	// MCP SDK core dependency
-	implementation 'io.modelcontextprotocol.sdk:mcp:0.17.1'
+	// Select the Jackson 2 module explicitly; the SDK aggregate defaults to Jackson 3.
+	implementation 'io.modelcontextprotocol.sdk:mcp-core:2.0.1'
+	implementation 'io.modelcontextprotocol.sdk:mcp-json-jackson2:2.0.1'
 	
 	// Jetty embedded server for servlet container
-	implementation 'org.eclipse.jetty:jetty-server:11.0.20'
-	implementation 'org.eclipse.jetty:jetty-servlet:11.0.20'
+	implementation 'org.eclipse.jetty:jetty-server:12.1.14'
+	implementation 'org.eclipse.jetty.ee11:jetty-ee11-servlet:12.1.14'
 	
 	// Jackson for JSON processing (required by MCP)
-	implementation 'com.fasterxml.jackson.core:jackson-databind:2.18.3'
-	implementation 'com.fasterxml.jackson.core:jackson-core:2.18.3'
-	implementation 'com.fasterxml.jackson.core:jackson-annotations:2.18.3'
+	implementation 'com.fasterxml.jackson.core:jackson-databind:2.21.1'
+	implementation 'com.fasterxml.jackson.core:jackson-core:2.21.1'
+	implementation 'com.fasterxml.jackson.core:jackson-annotations:2.21'
 
 	testImplementation 'org.junit.jupiter:junit-jupiter:6.1.0'
 	testRuntimeOnly 'org.junit.platform:junit-platform-launcher:6.1.0'
 }
 
+
+// implementation inherits Ghidra's api file trees; copy only our direct Maven
+// dependencies so the private jar never embeds the host platform itself.
+configurations.isolatedRuntime.dependencies.addAll(
+    configurations.implementation.dependencies.findAll {
+        it instanceof org.gradle.api.artifacts.ModuleDependency
+    }.collect { it.copy() })
+
 tasks.named('test') {
-	useJUnitPlatform()
+    useJUnitPlatform()
+    dependsOn tasks.named('shadowJar')
+    // Unit tests exercise one coherent public dependency set. A separate subprocess
+    // test exercises the packaged shaded jar with Ghidra's original jars first.
+    classpath = files(sourceSets.test.output, sourceSets.main.output,
+        configurations.isolatedRuntime, configurations.testRuntimeClasspath)
+    doFirst {
+        def hostLibraries = configurations.runtimeClasspath.files.findAll { library ->
+            library.canonicalFile.toPath().startsWith(file(ghidraInstallDir).canonicalFile.toPath())
+        }
+        systemProperty 'mcp.packagedTestClasspath', files(hostLibraries,
+            tasks.named('shadowJar').get().archiveFile.get().asFile,
+            sourceSets.test.output.classesDirs).asPath
+        systemProperty 'mcp.packagedJar', tasks.named('shadowJar').get().archiveFile.get().asFile.absolutePath
+    }
 }
 
 // Exclude additional files from the built extension
@@ -140,8 +229,8 @@ def ghidraInstallExtensionsZipDir = {
 
 def buildZipProvider = tasks.named('buildExtension', Zip).flatMap { it.archiveFile }
 
-def extensionZipGlob = "*_${extensionName}.zip"
-def installZipDropFileTree = fileTree(ghidraInstallExtensionsZipDir) { include extensionZipGlob }
+def extensionZipGlobs = ["*_${extensionName}.zip", "*_${extensionName}-*.zip"]
+def installZipDropFileTree = fileTree(ghidraInstallExtensionsZipDir) { include extensionZipGlobs }
 
 tasks.register('cleanExtractedExtension', Delete) {
 	group = "Ghidra"

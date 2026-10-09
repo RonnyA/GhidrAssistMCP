@@ -49,14 +49,14 @@ public class CompareFunctionsPrompt implements McpPrompt {
 
         context.append("## Comparison Analysis\n\n");
         context.append("### Structural Similarity\n");
-        context.append("- Number of basic blocks (use `get_basic_blocks`)\n");
+        context.append("- Number of basic blocks (use `get_control_flow_graph`)\n");
         context.append("- Control flow patterns\n");
         context.append("- Loop structures\n\n");
         context.append("### Semantic Similarity\n");
         context.append("- Parameter types and counts\n");
         context.append("- Return types\n");
-        context.append("- Local variable usage (use `variables` with action='list')\n");
-        context.append("- Called functions (use `xrefs`)\n\n");
+        context.append("- Local variable usage (use `list_function_variables`)\n");
+        context.append("- Called functions (use `get_callees`)\n\n");
         context.append("### Code Differences\n");
         context.append("- Highlight specific differences in logic\n");
         context.append("- Note any added/removed functionality\n\n");

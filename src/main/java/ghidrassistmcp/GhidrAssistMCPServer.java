@@ -5,18 +5,26 @@ package ghidrassistmcp;
 
 import java.time.Duration;
 import java.util.List;
+import java.util.EnumSet;
+import java.net.URI;
+import jakarta.servlet.DispatcherType;
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
 import java.util.Map;
 import java.util.function.BiFunction;
 
 import org.eclipse.jetty.server.Server;
 import org.eclipse.jetty.server.ServerConnector;
-import org.eclipse.jetty.servlet.ServletContextHandler;
-import org.eclipse.jetty.servlet.ServletHolder;
+import org.eclipse.jetty.ee11.servlet.ServletContextHandler;
+import org.eclipse.jetty.ee11.servlet.ServletHolder;
+import org.eclipse.jetty.ee11.servlet.FilterHolder;
 
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import io.modelcontextprotocol.json.jackson.JacksonMcpJsonMapper;
+import io.modelcontextprotocol.json.jackson2.JacksonMcpJsonMapper;
 import io.modelcontextprotocol.server.McpServer;
+import io.modelcontextprotocol.server.McpSyncServer;
+import io.modelcontextprotocol.spec.McpError;
 import io.modelcontextprotocol.server.McpServerFeatures;
 import io.modelcontextprotocol.server.McpSyncServerExchange;
 import io.modelcontextprotocol.server.transport.HttpServletSseServerTransportProvider;
@@ -37,6 +45,9 @@ public class GhidrAssistMCPServer {
     private final McpBackend backend;
     private final GhidrAssistMCPProvider provider;
     private Server jettyServer;
+    private McpSyncServer sseServer;
+    private McpSyncServer streamableServer;
+    private final Runnable catalogListener = this::refreshToolCatalog;
     private final String host;
     private final int port;
     
@@ -51,7 +62,7 @@ public class GhidrAssistMCPServer {
         this.provider = provider;
     }
     
-    public void start() throws Exception {
+    public synchronized void start() throws Exception {
         Msg.info(this, "Starting MCP Server initialization...");
         
         try {
@@ -69,6 +80,15 @@ public class GhidrAssistMCPServer {
             ServletContextHandler context = new ServletContextHandler(ServletContextHandler.SESSIONS);
             context.setContextPath("/");
             jettyServer.setHandler(context);
+            context.addFilter(new FilterHolder((request, response, chain) -> {
+                HttpServletRequest httpRequest = (HttpServletRequest) request;
+                String origin = httpRequest.getHeader("Origin");
+                if (origin != null && !isAllowedOrigin(origin, httpRequest)) {
+                    ((HttpServletResponse) response).sendError(403, "Origin is not allowed");
+                    return;
+                }
+                chain.doFilter(request, response);
+            }), "/*", EnumSet.of(DispatcherType.REQUEST));
             
             // Create MCP transport provider using custom ObjectMapper that ignores unknown properties
             Msg.info(this, "Creating MCP transport provider");
@@ -96,11 +116,21 @@ public class GhidrAssistMCPServer {
             Msg.info(this, "Building MCP server with backend tools");
             var sseServerBuilder = McpServer.sync(sseTransportProvider)
                 .serverInfo(backend.getServerInfo())
-                .capabilities(backend.getCapabilities());
+                .capabilities(backend.getCapabilities())
+                .instructions("Use explicit verb-noun tools such as get_pseudocode and get_disassembly. " +
+                    "Use list_project_files and open_program to begin; list_open_programs shows open targets. " +
+                    "Pass a unique program_name Project Path when several programs are open. " +
+                    "Modification tools change the Ghidra database. Long operations return a task handle; " +
+                    "poll get_task_status to retrieve their result.");
 
             var streamableServerBuilder = McpServer.sync(streamableTransportProvider)
                 .serverInfo(backend.getServerInfo())
-                .capabilities(backend.getCapabilities());
+                .capabilities(backend.getCapabilities())
+                .instructions("Use explicit verb-noun tools such as get_pseudocode and get_disassembly. " +
+                    "Use list_project_files and open_program to begin; list_open_programs shows open targets. " +
+                    "Pass a unique program_name Project Path when several programs are open. " +
+                    "Modification tools change the Ghidra database. Long operations return a task handle; " +
+                    "poll get_task_status to retrieve their result.");
 
             // Register each tool individually with its own handler
             for (McpSchema.Tool toolSchema : backend.getAvailableTools()) {
@@ -124,8 +154,11 @@ public class GhidrAssistMCPServer {
                 registerPrompts(sseServerBuilder, streamableServerBuilder, ghidraBackend);
             }
 
-            sseServerBuilder.build();
-            streamableServerBuilder.build();
+            sseServer = sseServerBuilder.build();
+            streamableServer = streamableServerBuilder.build();
+            if (backend instanceof GhidrAssistMCPBackend ghidraBackend) {
+                ghidraBackend.addToolCatalogListener(catalogListener);
+            }
             
             // Register MCP servlet - use root path since transport provider handles routing internally
             Msg.info(this, "Registering MCP servlet");
@@ -154,6 +187,7 @@ public class GhidrAssistMCPServer {
                 
             } catch (Exception e) {
                 Msg.error(this, "Failed to register MCP servlet", e);
+                throw e;
             }
             
             // Start Jetty server
@@ -188,17 +222,108 @@ public class GhidrAssistMCPServer {
             
         } catch (Exception e) {
             Msg.error(this, "Exception during MCP Server startup: " + e.getMessage(), e);
+            try {
+                stop();
+            } catch (Exception stopError) {
+                e.addSuppressed(stopError);
+            }
             throw e;
         }
     }
     
-    public void stop() throws Exception {
+    public synchronized void stop() throws Exception {
+        if (backend instanceof GhidrAssistMCPBackend ghidraBackend) {
+            ghidraBackend.removeToolCatalogListener(catalogListener);
+        }
+        Exception failure = null;
+        for (McpSyncServer server : new McpSyncServer[] { sseServer, streamableServer }) {
+            if (server != null) {
+                try {
+                    server.closeGracefully();
+                } catch (Exception error) {
+                    if (failure == null) {
+                        failure = error;
+                    } else {
+                        failure.addSuppressed(error);
+                    }
+                }
+            }
+        }
+        sseServer = null;
+        streamableServer = null;
         if (jettyServer != null) {
-            jettyServer.stop();
-            Msg.info(this, "GhidrAssistMCP Server stopped");
+            try {
+                jettyServer.stop();
+                Msg.info(this, "GhidrAssistMCP Server stopped");
+            } catch (Exception error) {
+                if (failure == null) {
+                    failure = error;
+                } else {
+                    failure.addSuppressed(error);
+                }
+            } finally {
+                jettyServer = null;
+            }
+        }
+        if (failure != null) {
+            throw failure;
         }
     }
-    
+
+    /** Port assigned by Jetty, including an ephemeral test port requested as zero. */
+    public int getBoundPort() {
+        if (jettyServer == null || jettyServer.getConnectors().length == 0) {
+            return -1;
+        }
+        return ((ServerConnector) jettyServer.getConnectors()[0]).getLocalPort();
+    }
+
+    /** Refresh enabled tools in both live transports; SDK emits list-changed notifications. */
+    public synchronized void refreshToolCatalog() {
+        List<McpSchema.Tool> available = backend.getAvailableTools();
+        for (McpSyncServer server : new McpSyncServer[] { sseServer, streamableServer }) {
+            if (server == null) {
+                continue;
+            }
+            var existing = new java.util.HashSet<String>();
+            for (McpSchema.Tool tool : server.listTools()) {
+                existing.add(tool.name());
+                if (available.stream().noneMatch(candidate -> candidate.name().equals(tool.name()))) {
+                    server.removeTool(tool.name());
+                }
+            }
+            for (McpSchema.Tool tool : available) {
+                if (!existing.contains(tool.name())) {
+                    server.addTool(new McpServerFeatures.SyncToolSpecification(tool,
+                        (exchange, request) -> backend.callTool(tool.name(), request.arguments())));
+                }
+            }
+        }
+    }
+
+    /** Native MCP clients omit Origin; browser clients must use the bound local origin. */
+    private boolean isAllowedOrigin(String value, HttpServletRequest request) {
+        try {
+            URI origin = URI.create(value);
+            String originHost = origin.getHost();
+            boolean loopbackBinding = "localhost".equalsIgnoreCase(host)
+                || "127.0.0.1".equals(host) || "::1".equals(host);
+            boolean allowedHost = host.equalsIgnoreCase(originHost)
+                || (loopbackBinding && ("localhost".equalsIgnoreCase(originHost)
+                    || "127.0.0.1".equals(originHost) || "[::1]".equals(originHost)
+                    || "::1".equals(originHost)));
+            int originPort = origin.getPort() >= 0 ? origin.getPort()
+                : "https".equalsIgnoreCase(origin.getScheme()) ? 443 : 80;
+            return allowedHost && originPort == request.getLocalPort()
+                && request.getScheme().equalsIgnoreCase(origin.getScheme())
+                && origin.getRawUserInfo() == null && origin.getRawQuery() == null
+                && origin.getRawFragment() == null
+                && (origin.getRawPath() == null || origin.getRawPath().isEmpty());
+        } catch (IllegalArgumentException error) {
+            return false;
+        }
+    }
+
     public void setCurrentProgram(Program program) {
         backend.onProgramActivated(program);
     }
@@ -232,8 +357,7 @@ public class GhidrAssistMCPServer {
                                 args.put(entry.getKey(), entry.getValue() != null ? entry.getValue().toString() : null);
                             }
                         }
-                        Program program = ghidraBackend.getCurrentProgram();
-                        return prompt.generatePrompt(args, program);
+                        return ghidraBackend.generatePrompt(prompt, args);
                     };
 
                 // Create specification
@@ -264,12 +388,12 @@ public class GhidrAssistMCPServer {
                                    GhidrAssistMCPBackend ghidraBackend) {
         try {
             List<McpResource> resources = ghidraBackend.getAvailableResources();
-            java.util.List<McpServerFeatures.SyncResourceSpecification> resourceSpecs = new java.util.ArrayList<>();
+            java.util.List<McpServerFeatures.SyncResourceTemplateSpecification> resourceSpecs = new java.util.ArrayList<>();
 
             for (McpResource resource : resources) {
                 // Create McpSchema.Resource for each resource
-                McpSchema.Resource mcpResource = McpSchema.Resource.builder()
-                    .uri(resource.getUriPattern())
+                McpSchema.ResourceTemplate mcpResource = McpSchema.ResourceTemplate.builder()
+                    .uriTemplate(resource.getUriPattern())
                     .name(resource.getName())
                     .description(resource.getDescription())
                     .mimeType(resource.getMimeType())
@@ -282,7 +406,7 @@ public class GhidrAssistMCPServer {
                         String content = ghidraBackend.readResource(uri);
 
                         if (content == null) {
-                            content = "{\"error\": \"Resource not found: " + uri + "\"}";
+                            throw McpError.RESOURCE_NOT_FOUND.apply(uri);
                         }
 
                         McpSchema.ResourceContents contents = new McpSchema.TextResourceContents(
@@ -295,16 +419,16 @@ public class GhidrAssistMCPServer {
                     };
 
                 // Create specification
-                McpServerFeatures.SyncResourceSpecification spec =
-                    new McpServerFeatures.SyncResourceSpecification(mcpResource, readHandler);
+                McpServerFeatures.SyncResourceTemplateSpecification spec =
+                    new McpServerFeatures.SyncResourceTemplateSpecification(mcpResource, readHandler);
                 resourceSpecs.add(spec);
                 Msg.info(this, "Prepared resource for registration: " + resource.getName());
             }
 
             // Register all resources with both builders
             if (!resourceSpecs.isEmpty()) {
-                sseServerBuilder.resources(resourceSpecs);
-                streamableServerBuilder.resources(resourceSpecs);
+                sseServerBuilder.resourceTemplates(resourceSpecs);
+                streamableServerBuilder.resourceTemplates(resourceSpecs);
                 Msg.info(this, "Registered " + resourceSpecs.size() + " MCP resources");
             }
 

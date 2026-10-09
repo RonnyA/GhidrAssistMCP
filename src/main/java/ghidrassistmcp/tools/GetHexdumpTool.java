@@ -138,42 +138,49 @@ public class GetHexdumpTool implements McpTool {
         result.append("Hexdump at ").append(startAddr).append(" (").append(length).append(" bytes):\n\n");
 
         int bytesRead = 0;
+        int unreadableBytes = 0;
         Address currentAddr = startAddr;
 
         while (bytesRead < length) {
             // Calculate how many bytes to read on this line
             int bytesToRead = Math.min(BYTES_PER_LINE, length - bytesRead);
             byte[] lineBytes = new byte[bytesToRead];
+            boolean[] readable = new boolean[bytesToRead];
 
             // Read the bytes for this line
             int actualBytesRead = 0;
             for (int i = 0; i < bytesToRead; i++) {
                 try {
                     lineBytes[i] = memory.getByte(currentAddr);
+                    readable[i] = true;
                     currentAddr = currentAddr.add(1);
                     actualBytesRead++;
                 } catch (MemoryAccessException e) {
-                    // If we can't read a byte, mark it as unreadable
-                    lineBytes[i] = 0;
+                    // Preserve uncertainty: an unreadable byte is not a known zero.
+                    unreadableBytes++;
                     currentAddr = currentAddr.add(1);
                     actualBytesRead++;
                 }
             }
 
             // Format the line
-            result.append(formatHexdumpLine(startAddr.add(bytesRead), lineBytes, actualBytesRead));
+            result.append(formatHexdumpLine(startAddr.add(bytesRead), lineBytes, readable, actualBytesRead));
             result.append("\n");
 
             bytesRead += actualBytesRead;
         }
 
+        if (unreadableBytes > 0) {
+            result.append("Unreadable bytes: ").append(unreadableBytes)
+                .append(" (shown as ??; ASCII shown as ?)\n");
+        }
         return result.toString();
     }
 
     /**
      * Format a single line of the hexdump.
      */
-    private String formatHexdumpLine(Address lineAddr, byte[] bytes, int validBytes) {
+    private String formatHexdumpLine(Address lineAddr, byte[] bytes, boolean[] readable, int validBytes) {
         StringBuilder line = new StringBuilder();
 
         if ( lineAddr.getOffset() > (1L << 32)) {
@@ -187,7 +194,7 @@ public class GetHexdumpTool implements McpTool {
         // Hex bytes (16 per line, with space after 8th byte)
         for (int i = 0; i < BYTES_PER_LINE; i++) {
             if (i < validBytes) {
-                line.append(String.format("%02x ", bytes[i] & 0xFF));
+                line.append(readable[i] ? String.format("%02x ", bytes[i] & 0xFF) : "?? ");
             } else {
                 line.append("   "); // 3 spaces for missing bytes
             }
@@ -201,6 +208,10 @@ public class GetHexdumpTool implements McpTool {
         // ASCII representation
         line.append(" |");
         for (int i = 0; i < validBytes; i++) {
+            if (!readable[i]) {
+                line.append('?');
+                continue;
+            }
             char c = (char) (bytes[i] & 0xFF);
             // Print printable ASCII characters, otherwise use '.'
             if (c >= 32 && c <= 126) {

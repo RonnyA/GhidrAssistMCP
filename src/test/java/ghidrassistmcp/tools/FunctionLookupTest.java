@@ -27,6 +27,17 @@ import ghidra.program.model.symbol.SymbolType;
 class FunctionLookupTest {
 
     @Test
+    void acceptsAddressesAndQualifiedNamesThroughTheCommonSelector() {
+        TestProgram testProgram = new TestProgram();
+        Namespace global = testProgram.namespace("Global", null, true);
+        Namespace owner = testProgram.namespace("Owner", global, false);
+        Function function = testProgram.function("method", 0x100, false, owner);
+        testProgram.index("method", function);
+        assertSame(function, FunctionLookup.findByName(testProgram.program, "0x100"));
+        assertSame(function, FunctionLookup.findByName(testProgram.program, "Owner::method"));
+    }
+
+    @Test
     void returnsLowestAddressForDuplicateIndexedNames() {
         TestProgram testProgram = new TestProgram();
         Function higher = testProgram.function("duplicate", 0x200, false, null);
@@ -98,6 +109,8 @@ class FunctionLookupTest {
             });
         private final AddressFactory addressFactory = fake(AddressFactory.class,
             (method, args) -> switch (method.getName()) {
+                case "getAddress" -> ((String) args[0]).startsWith("0x")
+                    ? addressSpace.getAddress(Long.parseLong(((String) args[0]).substring(2), 16)) : null;
                 case "getAddressSpace" -> null;
                 case "getDefaultAddressSpace" -> addressSpace;
                 default -> unsupported(method);

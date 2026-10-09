@@ -1,6 +1,5 @@
 package ghidrassistmcp.tools;
 
-import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
@@ -9,6 +8,7 @@ import ghidra.framework.model.DomainFile;
 import ghidra.framework.plugintool.PluginTool;
 import ghidra.program.model.listing.Program;
 import ghidra.util.Msg;
+import ghidra.util.SystemUtilities;
 import ghidrassistmcp.GhidrAssistMCPBackend;
 import ghidrassistmcp.GhidrAssistMCPManager;
 import ghidrassistmcp.McpTool;
@@ -67,28 +67,34 @@ public class CloseProgramTool implements McpTool {
     @Override
     public McpSchema.CallToolResult execute(Map<String, Object> arguments, Program currentProgram,
                                             GhidrAssistMCPBackend backend) {
-        GhidrAssistMCPManager manager = GhidrAssistMCPManager.getInstance();
-        PluginTool pluginTool = manager.getActiveTool();
-        if (pluginTool == null) {
-            return textResult("No active Ghidra tool/window available.");
+        GhidrAssistMCPManager manager = GhidrAssistMCPManager.findInstance();
+        if (manager == null) {
+            return errorResult("Closing GUI programs requires the Ghidra application.");
         }
+        return SystemUtilities.runSwingNow(() -> closeProgram(arguments, currentProgram, backend, manager));
+    }
 
-        ProgramManager programManager = pluginTool.getService(ProgramManager.class);
-        if (programManager == null) {
-            return textResult("ProgramManager service not available. Is CodeBrowser open?");
-        }
-
+    private McpSchema.CallToolResult closeProgram(Map<String, Object> arguments,
+                                                 Program currentProgram,
+                                                 GhidrAssistMCPBackend backend,
+                                                 GhidrAssistMCPManager manager) {
         String name = stringArg(arguments.get("name"), null);
         boolean save = Boolean.TRUE.equals(arguments.get("save"));
         boolean ignoreChanges = Boolean.TRUE.equals(arguments.get("ignore_changes"));
-
-        Program target = name == null ? programManager.getCurrentProgram() :
-            resolveOpenProgram(programManager.getAllOpenPrograms(), name);
+        Program target;
+        try {
+            target = name == null ? currentProgram : manager.getProgramByName(name);
+        } catch (IllegalArgumentException e) {
+            return errorResult(e.getMessage());
+        }
         if (target == null) {
-            if (name == null) {
-                return textResult("No current program is open.");
-            }
-            return textResult("Open program not found: " + name);
+            return errorResult(name == null ? "No current program is open." :
+                "Open program not found: " + name);
+        }
+        PluginTool owner = manager.getToolForProgram(target);
+        ProgramManager programManager = owner == null ? null : owner.getService(ProgramManager.class);
+        if (programManager == null) {
+            return errorResult("No CodeBrowser owns the requested program.");
         }
 
         String label = describeProgram(target);
@@ -98,14 +104,14 @@ public class CloseProgramTool implements McpTool {
                 programManager.saveProgram(target);
             } catch (Exception e) {
                 Msg.error(this, "Failed to save program before close: " + label, e);
-                return textResult("Failed to save before closing " + label + ": " +
+                return errorResult("Failed to save before closing " + label + ": " +
                     e.getClass().getSimpleName() + ": " + e.getMessage());
             }
         }
 
         boolean changedAfterSave = target.isChanged();
         if (changedAfterSave && !ignoreChanges) {
-            return textResult("Refusing to close changed program without saving: " + label +
+            return errorResult("Refusing to close changed program without saving: " + label +
                 "\nPass save=true to save first, or ignore_changes=true to close without saving.");
         }
 
@@ -114,12 +120,12 @@ public class CloseProgramTool implements McpTool {
             closed = programManager.closeProgram(target, ignoreChanges);
         } catch (Exception e) {
             Msg.error(this, "Failed to close program: " + label, e);
-            return textResult("Failed to close " + label + ": " +
+            return errorResult("Failed to close " + label + ": " +
                 e.getClass().getSimpleName() + ": " + e.getMessage());
         }
 
         if (!closed) {
-            return textResult("Program was not closed: " + label);
+            return errorResult("Program was not closed: " + label);
         }
 
         if (backend != null) {
@@ -133,38 +139,6 @@ public class CloseProgramTool implements McpTool {
             "Open Programs Remaining: " + programManager.getAllOpenPrograms().length);
     }
 
-    private Program resolveOpenProgram(Program[] openPrograms, String name) {
-        List<Program> exactMatches = new ArrayList<>();
-        List<Program> caseInsensitiveMatches = new ArrayList<>();
-        List<Program> partialMatches = new ArrayList<>();
-        String lowerName = name.toLowerCase();
-
-        for (Program program : openPrograms) {
-            String programName = program.getName();
-            String path = projectPath(program);
-            if (programName.equals(name) || name.equals(path)) {
-                exactMatches.add(program);
-            }
-            else if (programName.equalsIgnoreCase(name) || path.equalsIgnoreCase(name)) {
-                caseInsensitiveMatches.add(program);
-            }
-            else if (programName.toLowerCase().contains(lowerName) ||
-                     path.toLowerCase().contains(lowerName)) {
-                partialMatches.add(program);
-            }
-        }
-
-        if (exactMatches.size() == 1) {
-            return exactMatches.get(0);
-        }
-        if (caseInsensitiveMatches.size() == 1) {
-            return caseInsensitiveMatches.get(0);
-        }
-        if (partialMatches.size() == 1) {
-            return partialMatches.get(0);
-        }
-        return null;
-    }
 
     private String describeProgram(Program program) {
         String path = projectPath(program);
@@ -184,6 +158,10 @@ public class CloseProgramTool implements McpTool {
             return text;
         }
         return defaultValue;
+    }
+
+    private static McpSchema.CallToolResult errorResult(String message) {
+        return McpSchema.CallToolResult.builder().isError(true).addTextContent(message).build();
     }
 
     private McpSchema.CallToolResult textResult(String message) {

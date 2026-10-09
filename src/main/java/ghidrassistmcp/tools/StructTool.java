@@ -489,7 +489,7 @@ public class StructTool implements McpTool {
             if (existingStruct == null) {
                 return McpSchema.CallToolResult.builder()
                     .addTextContent("Structure '" + structureName + "' not found. " +
-                        "Use action='create' to create a new structure.")
+                        "Use create_structure to create a new structure.")
                     .build();
             }
 
@@ -562,14 +562,14 @@ public class StructTool implements McpTool {
             Structure existingStruct = findStructure(dtm, structureName);
             if (existingStruct == null) {
                 return McpSchema.CallToolResult.builder()
-                    .addTextContent("Structure '" + structureName + "' not found. Use action='create' first.")
+                    .addTextContent("Structure '" + structureName + "' not found. Use create_structure first.")
                     .build();
             }
 
             if (existingStruct.isPackingEnabled()) {
                 return McpSchema.CallToolResult.builder()
                     .addTextContent("Cannot safely merge into a packed structure ('" + existingStruct.getName() +
-                        "'). Use action='modify' or action='set_field' instead.")
+                        "'). Use replace_structure or set_structure_field instead.")
                     .build();
             }
 

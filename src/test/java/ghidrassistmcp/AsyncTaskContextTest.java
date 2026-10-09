@@ -101,6 +101,9 @@ class AsyncTaskContextTest {
             new Class<?>[] { Program.class }, (proxy, method, args) -> switch (method.getName()) {
                 case "getName" -> name;
                 case "getDomainFile" -> domainFile;
+                case "isClosed" -> false;
+                case "addConsumer" -> true;
+                case "release" -> null;
                 case "equals" -> proxy == args[0];
                 case "hashCode" -> System.identityHashCode(proxy);
                 case "toString" -> "FakeProgram[" + name + "]";

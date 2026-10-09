@@ -1,98 +1,53 @@
-# CLAUDE.md
+# GhidrAssistMCP workspace guide
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+GhidrAssistMCP is a Ghidra extension exposing static analysis, annotation, project operations, and program data through MCP. Work through the workspace symlink and preserve unrelated user changes. Never add a Co-Authored-By commit line.
 
-## Build and Development Commands
+## Build and validation
 
-### Building the Extension
+Use Java 25 or newer and the Gradle version supported by the selected Ghidra installation. The wrapper pins a supported Gradle release. The workspace's documented installation is Ghidra 12.0; Ghidra 12.1 is also available locally.
+
 ```bash
-# Set GHIDRA_INSTALL_DIR environment variable first
-export GHIDRA_INSTALL_DIR=/path/to/ghidra
-
-# Build the extension
-gradle distributeExtension
-
-# Or specify Ghidra path directly
-gradle -PGHIDRA_INSTALL_DIR=/path/to/ghidra distributeExtension
+GHIDRA_INSTALL_DIR=/home/jtang613/tools/ghidra_12.0_PUBLIC /opt/gradle/bin/gradle buildExtension test
 ```
 
-### Project Structure
-This is a Ghidra extension project with the following key components:
+The product release version is `3.0.0`, declared in `build.gradle` and the backend server metadata. Keep them synchronized when bumping releases. ZIPs and jar manifests carry that version; `extension.properties.version` must retain the Ghidra compatibility token.
 
-- **Main Plugin**: `GhidrAssistMCPPlugin.java` - Core plugin with UI provider and actions
-- **Analyzer**: `GhidrAssistMCPAnalyzer.java` - Custom analyzer for binary analysis
-- **Loader**: `GhidrAssistMCPLoader.java` - Custom loader for specific file formats
-- **Exporter**: `GhidrAssistMCPExporter.java` - Custom exporter functionality
-- **File System**: `GhidrAssistMCPFileSystem.java` - Custom file system implementation
+The extension ZIP is written to `dist/`. `installExtension` changes the Ghidra installation and user extension directories; building alone does not install it. Tests are under `src/test/java/` and use JUnit Jupiter. Include HTTP protocol tests when transport behavior changes, catalog contracts for names/schemas, and focused lifetime tests for concurrency changes.
 
-### Key Directories
-- `src/main/java/ghidrassistmcp/` - Main Java source code
-- `src/test/java/` - Test files
-- `data/` - Language specifications (SLEIGH files)
-- `ghidra_scripts/` - Ghidra scripts
-- `lib/` - External dependencies
-- `dist/` - Built extension output
+## Architecture
 
-### Development Notes
-- Extension uses Ghidra's plugin architecture with standard lifecycle methods
-- All components extend appropriate Ghidra base classes (AbstractAnalyzer, AbstractProgramWrapperLoader, etc.)
-- Built extension will be placed in `dist/` directory
-- Language specifications in `data/languages/` define custom processor architectures
-- Help documentation is in `src/main/help/`
+- `GhidrAssistMCPInitializer`: GUI module bootstrap, skipped in headless Ghidra.
+- `GhidrAssistMCPApplicationPlugin`: project-manager application owner and CodeBrowser discovery.
+- `GhidrAssistMCPPlugin`: lightweight CodeBrowser adapter, with per-window cursor/focus context.
+- `GhidrAssistMCPManager`: one shared runtime, backend, server, configuration, and bounded log. The project manager keeps it alive after all browsers close.
+- `GhidrAssistMCPProvider`: a per-window view of shared state. Providers never own the transport or independently load settings into the backend.
+- `GhidrAssistMCPBackend`: catalog, validation, program resolution, result/error handling, caching, resources, prompts, and jobs.
+- `GhidrAssistMCPServer`: Streamable HTTP `/mcp` plus legacy SSE `/sse` and `/message`; retains SDK server instances for live catalog changes and shutdown.
+- `tools/RationalizedToolCatalog` and `tools/ExplicitTool`: operation-specific public contracts over shared implementations. The public catalog has 100 tools, 93 enabled by default.
+- `project/`: GUI project creation/open/save/close through public Ghidra APIs and the application-owned frontend.
+- `ProjectOperationGate`: fail-fast lifecycle exclusion across tools, resources, prompts, and physical async-worker cleanup.
+- `tasks/`: custom job tracking, bounded pending work, cancellation, and execution cleanup.
+- `cache/`: program identity/revision-aware raw result caching.
+- `decompiler/`: isolated per-call decompiler sessions, using the owning CodeBrowser's options.
 
-### Dependencies
-- Requires Ghidra installation with matching Gradle version
-- Uses Ghidra's buildExtension.gradle for build configuration
-- MCP SDK (io.modelcontextprotocol.sdk:mcp:0.9.0) for Model Context Protocol support
-- Jetty 11.0.20 for embedded HTTP server
-- Jackson 2.17.0 for JSON processing
+Use public Ghidra APIs. Keep Swing/ProgramManager operations on the event thread and expensive program loading, decompilation, and server lifecycle work off it. Retain program consumers across asynchronous work and release them on completion, cancellation before execution, failed submission, and shutdown.
 
-### MCP Server
-The extension includes an embedded MCP (Model Context Protocol) server that:
-- Runs on port 8080 by default
-- Provides SSE endpoint at `/mcp/sse` and HTTP request endpoint at `/mcp/message`
-- Automatically tracks the currently loaded program
-- Exposes Ghidra analysis capabilities via MCP tools:
-  - `get_program_info`: Get basic program information
-  - `list_functions`: List all functions in the program
-  - `get_function_info`: Get detailed function information
+## MCP contracts
 
-### Build Requirements
-- Java 25 or higher
-- Gradle version matching your Ghidra installation
-- Internet connection for dependency downloads from Maven Central
+Use descriptive `verb_noun` names. Reads and mutations should be separate public tools; keep discriminators inside shared implementations. `get_disassembly` reads instructions, while `disassemble_bytes` changes the listing. `get_function_hash` computes SHA-256; `get_function_byte_pattern` returns a masked prefix; `get_function_prototype` reads the C declaration.
 
-### Build Command Notes
-- Always use the build command: `GHIDRA_INSTALL_DIR=/home/jtang613/tools/ghidra_11.4_PUBLIC/ /opt/gradle/bin/gradle buildExtension`
+Validate inputs and return `isError=true` for operation failures. Preserve all content kinds, structured content, metadata, and error flags when adding context. Output schemas must cover every successful result shape, including an initial custom async-job handle where applicable. Prefer typed results for new tools and preserve text compatibility.
 
-### Testing
-- No formal test suite currently exists
-- Manual testing through Ghidra UI and MCP client connections
-- Test tools individually through the Configuration tab
+Program-specific tools accept `program_name`, preferably an exact project path. Unknown/ambiguous explicit targets must never fall back to an active program. Cursor tools use the focused browser. Project/job tools declare that they do not require a program. `import_file.program_name` is the new imported program's name, not a target selector.
 
-### Core Architecture
-The extension follows a plugin-based architecture:
-- **Plugin Layer**: `GhidrAssistMCPPlugin` manages lifecycle, Ghidra integration, and multi-program tracking via ProgramManager service
-- **Server Layer**: `GhidrAssistMCPServer` handles HTTP/SSE MCP protocol
-- **Backend Layer**: `GhidrAssistMCPBackend` manages tool registry, execution, and program resolution
-- **UI Layer**: `GhidrAssistMCPProvider` provides configuration and logging interface
-- **Tool Layer**: 39 individual tools implementing the `McpTool` interface
+`create_project`, `open_project`, `save_project`, and `close_project` are synchronous lifecycle operations with structured results. They do not require a program or accept `program_name`. Declare `isProjectLifecycleOperation()` so the backend serializes transitions against other MCP work. Create/open never replace an active project. Open uses an exact absolute `.gpr` path with `restore_state=false` by default. Close defaults to refusing unsaved changes; `save` and `discard_changes` are explicit, mutually exclusive choices. Keep the frontend/runtime alive when a project closes. Saving project session metadata alone does not save dirty program files: use the controller's checked file-save path. Recheck the active project and open-data membership immediately before closing on the event thread. Automatic view attachment must preserve the existing configuration-dirty flag. Unsaved tool configuration/plugin data can still prevent safe closure after a project save; explicit discard is required to drop it. Running commands and busy domain-object locks always prevent saving/closing. The metadata-save receipt uses a private project SaveState checkpoint and verifies the persisted project-state file because Ghidra's void save API swallows I/O failures; use the JDK XML parser and keep this verification tested against supported host versions. The current public guards do not invoke plugin-specific close veto callbacks, so include installed plugins in GUI acceptance.
 
-### Multi-Program Support
-- All tools support an optional `program_name` parameter to target specific programs
-- Use `list_programs` tool to see all open programs
-- Program resolution supports exact, case-insensitive, and partial name matching
+`import_file`, `export_program`, and script operations remain disabled by default. Legacy settings migrate to canonical operations. Old backend aliases support internal compatibility only; they are not exposed as HTTP tools. Clients must refresh their catalog after upgrade.
 
-### MCP Tools System
-Tools are dynamically registered and can be enabled/disabled:
-- All tools extend `McpTool` interface with `getName()`, `getDescription()`, `getInputSchema()`, and `execute()`
-- Tools are organized into categories: Analysis, Modification, Navigation, and Advanced
-- Backend maintains tool registry with enable/disable states
-- UI provides real-time tool management and activity logging
+MCP Java SDK 2.0.1 is supplied through `mcp-core` and `mcp-json-jackson2`. Streamable HTTP supports protocol `2025-11-25`, while legacy SSE uses `2024-11-05`; full `2026-07-28` support belongs to a future SDK migration. Do not claim that the application's job tools implement the negotiated MCP Tasks extension.
 
-### Development Workflow
-1. Build with `gradle buildExtension`
-2. Install generated ZIP from `dist/` directory in Ghidra
-3. Enable plugin in Ghidra's Configure Plugins dialog
-4. Access UI via Window → GhidrAssistMCP
-5. Configure server settings and test tools through UI
+Generated `lib/` may contain stale jars from prior builds. The Gradle configuration excludes those jars from compilation and packaging. Shadow bundles the selected SDK, Jackson, NetworkNT, Jetty, Servlet, Reactor, and SLF4J runtime under private `ghidrassistmcp.internal.*` packages in one jar; Ghidra API and host Gson remain external. A subprocess test loads the packaged jar after Ghidra's libraries to check isolation and HTTP behavior.
+
+## Documentation
+
+`README.md` describes installation, startup, endpoints, and usage. `docs/modernization-review.md` contains the complete previous-to-current tool mapping, architecture decisions, compatibility notes, proposed additions, and validation matrix. Keep them consistent with the live catalog. There are no analyzer/loader/exporter skeleton components in this extension.

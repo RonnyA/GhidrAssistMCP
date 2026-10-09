@@ -3,23 +3,23 @@
  */
 package ghidrassistmcp;
 
-import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.awt.event.WindowAdapter;
+import java.awt.event.WindowEvent;
+import java.awt.event.WindowFocusListener;
 
 import ghidra.MiscellaneousPluginPackage;
 import ghidra.app.plugin.PluginCategoryNames;
 import ghidra.app.plugin.ProgramPlugin;
 import ghidra.app.services.ProgramManager;
-import ghidra.framework.model.DomainFile;
 import ghidra.framework.plugintool.*;
 import ghidra.framework.plugintool.util.PluginStatus;
 import ghidra.program.model.address.Address;
 import ghidra.program.model.listing.Function;
-import ghidra.program.model.listing.FunctionManager;
 import ghidra.program.model.listing.Program;
 import ghidra.program.util.ProgramLocation;
-import ghidra.util.Msg;
+import ghidra.util.SystemUtilities;
 
 /**
  * GhidrAssistMCP Plugin - Provides an MCP (Model Context Protocol) server for Ghidra analysis capabilities.
@@ -36,7 +36,7 @@ public class GhidrAssistMCPPlugin extends ProgramPlugin {
 
 	private GhidrAssistMCPProvider provider;
 	private GhidrAssistMCPManager manager;
-	private boolean isServerOwner = false;
+	private WindowFocusListener windowFocusListener;
 
 	// Current UI location tracking
 	private volatile ProgramLocation currentLocation1;
@@ -49,8 +49,6 @@ public class GhidrAssistMCPPlugin extends ProgramPlugin {
 	public GhidrAssistMCPPlugin(PluginTool tool) {
 		super(tool);
 		
-		// Create the UI provider but don't register it yet
-		provider = new GhidrAssistMCPProvider(tool, this);
 	}
 
 	@Override
@@ -60,35 +58,16 @@ public class GhidrAssistMCPPlugin extends ProgramPlugin {
 		// Get the singleton manager
 		manager = GhidrAssistMCPManager.getInstance();
 
-		// Register the UI provider with the tool first
-		if (provider != null) {
-			try {
-				tool.addComponentProvider(provider, true);
-				Msg.info(this, "Successfully registered UI provider");
-			} catch (IllegalArgumentException e) {
-				if (e.getMessage() != null && e.getMessage().contains("was already added")) {
-					Msg.info(this, "UI provider already registered, continuing");
-				} else {
-					Msg.error(this, "Failed to register UI provider (non-fatal): " + e.getMessage());
-				}
-			} catch (Exception e) {
-				Msg.error(this, "Failed to register UI provider (non-fatal): " + e.getMessage());
+		provider = new GhidrAssistMCPProvider(tool, manager);
+		tool.addComponentProvider(provider, false);
+		manager.registerTool(tool, this, provider);
+		windowFocusListener = new WindowAdapter() {
+			@Override
+			public void windowGainedFocus(WindowEvent event) {
+				manager.setActiveTool(tool);
 			}
-		}
-
-		// Register this tool with the singleton manager
-		// The first tool to register becomes the server owner and gets its provider used
-		isServerOwner = manager.registerTool(tool, provider);
-
-		if (isServerOwner) {
-			Msg.info(this, "This plugin instance is the MCP server owner");
-		} else {
-			Msg.info(this, "This plugin instance registered with existing MCP server");
-		}
-
-		if (provider != null) {
-			provider.logSession("Plugin initialized" + (isServerOwner ? " (server owner)" : ""));
-		}
+		};
+		tool.getToolFrame().addWindowFocusListener(windowFocusListener);
 	}
 	
 	/**
@@ -104,18 +83,16 @@ public class GhidrAssistMCPPlugin extends ProgramPlugin {
 	@Override
 	protected void programActivated(Program program) {
 		super.programActivated(program);
+		currentLocation1 = null;
 
-		// Notify manager that this tool is now active (focus tracking)
-		if (manager != null) {
+		// Activation in an unfocused browser must not steal the request context.
+		if (manager != null && (tool.getToolFrame().isActive() || manager.getActiveTool() == tool)) {
 			manager.setActiveTool(tool);
 		}
 
 		GhidrAssistMCPBackend backend = getBackend();
 		if (backend != null) {
 			backend.onProgramActivated(program);
-		}
-		if (provider != null && program != null) {
-			provider.logSession("Program activated: " + program.getName());
 		}
 	}
 	
@@ -124,19 +101,17 @@ public class GhidrAssistMCPPlugin extends ProgramPlugin {
 		super.locationChanged(loc);
 		this.currentLocation1 = loc;
 
-		// Set this as the active plugin for UI context access
-		if (manager != null) {
+		// Update the cursor without overriding focus in another browser.
+		if (manager != null && (tool.getToolFrame().isActive() || manager.getActiveTool() == tool)) {
 			manager.setActivePlugin(this);
 		}
 
-		if (provider != null && loc != null) {
-			provider.logMessage("Location changed to: " + loc.getAddress());
-		}
 	}
 	
 	@Override
 	protected void programDeactivated(Program program) {
 		super.programDeactivated(program);
+		currentLocation1 = null;
 		GhidrAssistMCPBackend backend = getBackend();
 		if (backend != null) {
 			backend.onProgramDeactivated(program);
@@ -148,26 +123,22 @@ public class GhidrAssistMCPPlugin extends ProgramPlugin {
 	
 	@Override
 	protected void dispose() {
-		if (provider != null) {
-			provider.logSession("Plugin disposing");
-
-			try {
-				tool.removeComponentProvider(provider);
-			} catch (Exception e) {
-				Msg.error(this, "Error removing UI provider", e);
-			}
-			provider = null;
+		if (windowFocusListener != null) {
+			tool.getToolFrame().removeWindowFocusListener(windowFocusListener);
+			windowFocusListener = null;
 		}
-
-		// Unregister this tool from the singleton manager
-		// The manager will stop the server when all tools are unregistered
 		if (manager != null) {
 			manager.unregisterTool(tool);
 		}
-
+		if (provider != null) {
+			provider.detach();
+			tool.removeComponentProvider(provider);
+			provider = null;
+		}
+		currentLocation1 = null;
 		super.dispose();
 	}
-	
+
 	/**
 	 * Get the MCP backend for tool management.
 	 * Returns the shared backend from the singleton manager.
@@ -205,15 +176,14 @@ public class GhidrAssistMCPPlugin extends ProgramPlugin {
 	 */
 	@Override
 	public Program getCurrentProgram() {
-		ProgramManager pm = tool.getService(ProgramManager.class);
-		if (pm != null) {
-			Program current = pm.getCurrentProgram();
-			if (current != null) {
-				return current;
+		return SystemUtilities.runSwingNow(() -> {
+			PluginTool browser = tool;
+			if (browser == null) {
+				return null;
 			}
-		}
-		// Fall back to parent implementation
-		return super.getCurrentProgram();
+			ProgramManager pm = browser.getService(ProgramManager.class);
+			return pm != null ? pm.getCurrentProgram() : super.getCurrentProgram();
+		});
 	}
 
 	/**
@@ -221,17 +191,11 @@ public class GhidrAssistMCPPlugin extends ProgramPlugin {
 	 * This allows tools to list and select from multiple open programs.
 	 */
 	public List<Program> getAllOpenPrograms() {
-		List<Program> programs = new ArrayList<>();
-		ProgramManager pm = tool.getService(ProgramManager.class);
-		if (pm != null) {
-			Program[] openPrograms = pm.getAllOpenPrograms();
-			if (openPrograms != null) {
-				for (Program p : openPrograms) {
-					programs.add(p);
-				}
-			}
-		}
-		return programs;
+		return SystemUtilities.runSwingNow(() -> {
+			PluginTool browser = tool;
+			ProgramManager pm = browser == null ? null : browser.getService(ProgramManager.class);
+			return pm == null ? List.of() : List.of(pm.getAllOpenPrograms());
+		});
 	}
 
 	/**
@@ -242,65 +206,30 @@ public class GhidrAssistMCPPlugin extends ProgramPlugin {
 	 * @return The matching program, or null if not found
 	 */
 	public Program getProgramByName(String programName) {
-		if (programName == null || programName.trim().isEmpty()) {
-			return getCurrentProgram();
-		}
-
-		List<Program> programs = getAllOpenPrograms();
-
-		// Exact project path match (e.g. "/v1/app.exe" disambiguates from "/v2/app.exe")
-		for (Program p : programs) {
-			DomainFile df = p.getDomainFile();
-			if (df != null && df.getPathname().equals(programName)) {
-				return p;
-			}
-		}
-
-		// Exact name match
-		for (Program p : programs) {
-			if (p.getName().equals(programName)) {
-				return p;
-			}
-		}
-
-		// Case-insensitive match
-		for (Program p : programs) {
-			if (p.getName().equalsIgnoreCase(programName)) {
-				return p;
-			}
-		}
-
-		// Partial match
-		for (Program p : programs) {
-			if (p.getName().toLowerCase().contains(programName.toLowerCase())) {
-				return p;
-			}
-		}
-
-		return null;
+		return manager == null ? null : manager.getProgramByName(programName);
 	}
 
 	/**
 	 * Get the current UI address from the location tracker.
 	 */
 	public Address getCurrentAddress() {
-		if (currentLocation1 != null) {
-			return currentLocation1.getAddress();
-		}
-		return null;
+		return SystemUtilities.runSwingNow(() -> {
+			ProgramLocation location = currentLocation1;
+			return location != null && location.getProgram() == getCurrentProgram() ?
+				location.getAddress() : null;
+		});
 	}
 
 	/**
 	 * Get the current function containing the UI cursor.
 	 */
 	public Function getCurrentFunction() {
-		Program program = getCurrentProgram();
-		Address address = getCurrentAddress();
-
-		if (program != null && address != null) {
-			FunctionManager functionManager = program.getFunctionManager();
-			return functionManager.getFunctionContaining(address);
-		}
-		return null;
+		return SystemUtilities.runSwingNow(() -> {
+			Program program = getCurrentProgram();
+			Address address = getCurrentAddress();
+			return program == null || address == null ? null :
+				program.getFunctionManager().getFunctionContaining(address);
+		});
 	}
+
 }

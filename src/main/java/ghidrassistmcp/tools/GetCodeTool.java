@@ -22,6 +22,8 @@ import ghidra.program.model.pcode.PcodeOpAST;
 import ghidra.util.task.TaskMonitor;
 import ghidrassistmcp.McpTool;
 import ghidrassistmcp.GhidrAssistMCPBackend;
+import ghidrassistmcp.tasks.McpTask;
+import ghidrassistmcp.tasks.McpTaskMonitor;
 import ghidrassistmcp.decompiler.DecompilerService;
 import ghidrassistmcp.decompiler.DecompilerSession;
 import io.modelcontextprotocol.spec.McpSchema;
@@ -93,9 +95,22 @@ public class GetCodeTool implements McpTool {
 
     @Override
     public McpSchema.CallToolResult execute(Map<String, Object> arguments, Program currentProgram) {
+        return executeWithMonitor(arguments, currentProgram, TaskMonitor.DUMMY);
+    }
+
+    @Override
+    public McpSchema.CallToolResult execute(Map<String, Object> arguments, Program currentProgram,
+            GhidrAssistMCPBackend backend, McpTask task) {
+        TaskMonitor monitor = new McpTaskMonitor(task, 0, 100, "Retrieving function code");
+        return executeWithMonitor(arguments, currentProgram, monitor);
+    }
+
+    private McpSchema.CallToolResult executeWithMonitor(Map<String, Object> arguments,
+            Program currentProgram, TaskMonitor monitor) {
         if (currentProgram == null) {
             return McpSchema.CallToolResult.builder()
                 .addTextContent("No program currently loaded")
+                .isError(true)
                 .build();
         }
 
@@ -106,12 +121,14 @@ public class GetCodeTool implements McpTool {
         if (functionIdentifier == null || functionIdentifier.isEmpty()) {
             return McpSchema.CallToolResult.builder()
                 .addTextContent("function parameter is required")
+                .isError(true)
                 .build();
         }
 
         if (format == null || format.isEmpty()) {
             return McpSchema.CallToolResult.builder()
                 .addTextContent("format parameter is required (decompiler, disassembly, or pcode)")
+                .isError(true)
                 .build();
         }
 
@@ -119,6 +136,7 @@ public class GetCodeTool implements McpTool {
         if (!format.equals("decompiler") && !format.equals("disassembly") && !format.equals("pcode")) {
             return McpSchema.CallToolResult.builder()
                 .addTextContent("Invalid format. Use 'decompiler', 'disassembly', or 'pcode'")
+                .isError(true)
                 .build();
         }
 
@@ -127,20 +145,22 @@ public class GetCodeTool implements McpTool {
         if (function == null) {
             return McpSchema.CallToolResult.builder()
                 .addTextContent("Function not found: " + functionIdentifier)
+                .isError(true)
                 .build();
         }
 
         // Dispatch to appropriate handler based on format
         switch (format) {
             case "decompiler":
-                return getDecompiledCode(currentProgram, function);
+                return getDecompiledCode(currentProgram, function, monitor);
             case "disassembly":
-                return getDisassemblyCode(currentProgram, function);
+                return getDisassemblyCode(currentProgram, function, monitor);
             case "pcode":
-                return getPcodeRepresentation(currentProgram, function, raw);
+                return getPcodeRepresentation(currentProgram, function, raw, monitor);
             default:
                 return McpSchema.CallToolResult.builder()
                     .addTextContent("Unknown format: " + format)
+                    .isError(true)
                     .build();
         }
     }
@@ -148,20 +168,25 @@ public class GetCodeTool implements McpTool {
     /**
      * Get decompiled C-like code for a function.
      */
-    private McpSchema.CallToolResult getDecompiledCode(Program program, Function function) {
+    private McpSchema.CallToolResult getDecompiledCode(Program program, Function function, TaskMonitor monitor) {
         try (DecompilerSession session = decompilerService.open(function.getProgram())) {
             DecompileResults results = session.decompiler().decompileFunction(function,
-                session.options().getDefaultTimeout(), TaskMonitor.DUMMY);
+                session.options().getDefaultTimeout(), monitor);
 
+            if (monitor.isCancelled()) {
+                return cancelledResult();
+            }
             if (results.isTimedOut()) {
                 return McpSchema.CallToolResult.builder()
                     .addTextContent("Decompilation timed out for function: " + function.getName(true))
+                    .isError(true)
                     .build();
             }
 
-            if (results.isValid() == false) {
+            if (!results.decompileCompleted() || results.getDecompiledFunction() == null) {
                 return McpSchema.CallToolResult.builder()
                     .addTextContent("Decompilation error for function " + function.getName(true) + ": " + results.getErrorMessage())
+                    .isError(true)
                     .build();
             }
 
@@ -170,6 +195,7 @@ public class GetCodeTool implements McpTool {
             if (decompiledCode == null || decompiledCode.trim().isEmpty()) {
                 return McpSchema.CallToolResult.builder()
                     .addTextContent("No decompiled code available for function: " + function.getName(true))
+                    .isError(true)
                     .build();
             }
 
@@ -180,6 +206,7 @@ public class GetCodeTool implements McpTool {
         } catch (Exception e) {
             return McpSchema.CallToolResult.builder()
                 .addTextContent("Error decompiling function " + function.getName(true) + ": " + e.getMessage())
+                .isError(true)
                 .build();
         }
     }
@@ -187,7 +214,7 @@ public class GetCodeTool implements McpTool {
     /**
      * Get disassembly for a function.
      */
-    private McpSchema.CallToolResult getDisassemblyCode(Program program, Function function) {
+    private McpSchema.CallToolResult getDisassemblyCode(Program program, Function function, TaskMonitor monitor) {
         StringBuilder result = new StringBuilder();
         result.append("Disassembly of function: ").append(function.getName(true)).append("\n");
         result.append("Entry Point: ").append(function.getEntryPoint()).append("\n\n");
@@ -197,6 +224,9 @@ public class GetCodeTool implements McpTool {
 
         int instructionCount = 0;
         while (instrIter.hasNext()) {
+            if (monitor.isCancelled()) {
+                return cancelledResult();
+            }
             Instruction instruction = instrIter.next();
 
             result.append(instruction.getAddress()).append(": ");
@@ -232,18 +262,22 @@ public class GetCodeTool implements McpTool {
     /**
      * Get P-Code representation for a function.
      */
-    private McpSchema.CallToolResult getPcodeRepresentation(Program program, Function function, boolean raw) {
+    private McpSchema.CallToolResult getPcodeRepresentation(Program program, Function function, boolean raw, TaskMonitor monitor) {
         StringBuilder result = new StringBuilder();
         result.append("P-Code for: ").append(function.getName(true))
               .append(" @ ").append(function.getEntryPoint()).append("\n\n");
 
         try (DecompilerSession session = decompilerService.open(program)) {
             DecompileResults results = session.decompiler().decompileFunction(function,
-                session.options().getDefaultTimeout(), TaskMonitor.DUMMY);
+                session.options().getDefaultTimeout(), monitor);
 
+            if (monitor.isCancelled()) {
+                return cancelledResult();
+            }
             if (!results.decompileCompleted()) {
                 return McpSchema.CallToolResult.builder()
                     .addTextContent("Decompilation failed for function: " + function.getName(true))
+                    .isError(true)
                     .build();
             }
 
@@ -251,6 +285,7 @@ public class GetCodeTool implements McpTool {
             if (highFunction == null) {
                 return McpSchema.CallToolResult.builder()
                     .addTextContent("Could not get high function for: " + function.getName(true))
+                    .isError(true)
                     .build();
             }
 
@@ -260,6 +295,9 @@ public class GetCodeTool implements McpTool {
                 result.append("## Raw P-Code Operations:\n```\n");
                 Iterator<PcodeOpAST> ops = highFunction.getPcodeOps();
                 while (ops.hasNext()) {
+                    if (monitor.isCancelled()) {
+                        return cancelledResult();
+                    }
                     PcodeOpAST op = ops.next();
                     result.append(op.getSeqnum().getTarget()).append(": ")
                           .append(op.toString()).append("\n");
@@ -271,6 +309,9 @@ public class GetCodeTool implements McpTool {
                 var blocks = highFunction.getBasicBlocks();
 
                 for (var block : blocks) {
+                    if (monitor.isCancelled()) {
+                        return cancelledResult();
+                    }
                     if (block instanceof PcodeBlockBasic basicBlock) {
                         result.append("### Block ").append(basicBlock.getIndex())
                               .append(" @ ").append(basicBlock.getStart()).append("\n");
@@ -278,6 +319,9 @@ public class GetCodeTool implements McpTool {
 
                         Iterator<PcodeOp> blockOps = basicBlock.getIterator();
                         while (blockOps.hasNext()) {
+                            if (monitor.isCancelled()) {
+                                return cancelledResult();
+                            }
                             PcodeOp op = blockOps.next();
                             result.append("  ").append(op.toString()).append("\n");
                         }
@@ -298,6 +342,13 @@ public class GetCodeTool implements McpTool {
 
         return McpSchema.CallToolResult.builder()
             .addTextContent(result.toString())
+            .build();
+    }
+
+    private static McpSchema.CallToolResult cancelledResult() {
+        return McpSchema.CallToolResult.builder()
+            .addTextContent("Function code retrieval cancelled")
+            .isError(true)
             .build();
     }
 

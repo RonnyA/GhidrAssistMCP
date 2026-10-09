@@ -171,14 +171,15 @@ public class GhidrAssistMCPHeadlessServer {
             return Collections.emptyList();
         }
 
-        synchronized void shutdown() {
+        @Override
+        public synchronized void shutdown() {
             Program program = currentProgram;
             currentProgram = null;
             if (program != null) {
                 onProgramDeactivated(program);
                 releaseProgram(program);
             }
-            getTaskManager().shutdown();
+            super.shutdown();
         }
 
         void enableAgentLabTools() {

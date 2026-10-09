@@ -30,6 +30,7 @@ import ghidra.util.Msg;
 import ghidra.util.task.TaskMonitor;
 import ghidrassistmcp.GhidrAssistMCPBackend;
 import ghidrassistmcp.GhidrAssistMCPManager;
+import ghidrassistmcp.GhidrAssistMCPPlugin;
 import ghidrassistmcp.McpTool;
 import ghidrassistmcp.tasks.McpTask;
 import io.modelcontextprotocol.spec.McpSchema;
@@ -321,12 +322,13 @@ public class GhidraScriptsTool implements McpTool {
     }
 
     private GhidraState buildState(Program currentProgram, GhidrAssistMCPBackend backend) {
-        GhidrAssistMCPManager manager = GhidrAssistMCPManager.getInstance();
-        PluginTool tool = manager.getActiveTool();
-        Project project = tool != null ? tool.getProject() : null;
+        GhidrAssistMCPManager manager = GhidrAssistMCPManager.findInstance();
+        PluginTool tool = manager == null ? null : manager.getToolForProgram(currentProgram);
+        Project project = manager == null ? null : manager.getProject();
         Address currentAddress = null;
-        if (backend != null && backend.getActivePlugin() != null) {
-            currentAddress = backend.getActivePlugin().getCurrentAddress();
+        GhidrAssistMCPPlugin activePlugin = backend == null ? null : backend.getActivePlugin();
+        if (activePlugin != null && activePlugin.getCurrentProgram() == currentProgram) {
+            currentAddress = activePlugin.getCurrentAddress();
         }
         ProgramLocation location =
             currentProgram != null && currentAddress != null ? new ProgramLocation(currentProgram, currentAddress) : null;

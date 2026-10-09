@@ -8,7 +8,6 @@ import java.util.Map;
 import ghidra.framework.model.DomainFile;
 import ghidra.framework.model.DomainFolder;
 import ghidra.framework.model.Project;
-import ghidra.framework.plugintool.PluginTool;
 import ghidra.util.Msg;
 import ghidrassistmcp.GhidrAssistMCPBackend;
 import ghidrassistmcp.GhidrAssistMCPManager;
@@ -81,7 +80,7 @@ public class ProjectFilesTool implements McpTool {
 
     @Override
     public McpSchema.CallToolResult execute(Map<String, Object> arguments, ghidra.program.model.listing.Program currentProgram) {
-        return textResult("This tool requires backend context (project access).");
+        return errorResult("This tool requires backend context (project access).");
     }
 
     @Override
@@ -90,12 +89,12 @@ public class ProjectFilesTool implements McpTool {
                                             GhidrAssistMCPBackend backend) {
         Project project = getProject();
         if (project == null) {
-            return textResult("No Ghidra project is open.");
+            return errorResult("No Ghidra project is open.");
         }
 
         String action = (String) arguments.get("action");
         if (action == null || action.isBlank()) {
-            return textResult("action is required: list or delete.");
+            return errorResult("action is required: list or delete.");
         }
 
         DomainFolder root = project.getProjectData().getRootFolder();
@@ -107,9 +106,8 @@ public class ProjectFilesTool implements McpTool {
     }
 
     private Project getProject() {
-        GhidrAssistMCPManager manager = GhidrAssistMCPManager.getInstance();
-        PluginTool pluginTool = manager.getActiveTool();
-        return pluginTool != null ? pluginTool.getProject() : null;
+        GhidrAssistMCPManager manager = GhidrAssistMCPManager.findInstance();
+        return manager == null ? null : manager.getProject();
     }
 
     private McpSchema.CallToolResult list(DomainFolder root, Map<String, Object> arguments) {
@@ -118,7 +116,7 @@ public class ProjectFilesTool implements McpTool {
 
         DomainFolder folder = resolveFolder(root, folderPath);
         if (folder == null) {
-            return textResult("Folder not found: " + folderPath);
+            return errorResult("Folder not found: " + folderPath);
         }
 
         List<String> rows = new ArrayList<>();
@@ -137,17 +135,17 @@ public class ProjectFilesTool implements McpTool {
     private McpSchema.CallToolResult delete(DomainFolder root, Map<String, Object> arguments,
                                             GhidrAssistMCPBackend backend) {
         if (!Boolean.TRUE.equals(arguments.get("confirm"))) {
-            return textResult("Refusing to delete. Pass confirm=true to delete a project file or folder.");
+            return errorResult("Refusing to delete. Pass confirm=true to delete a project file or folder.");
         }
 
         String path = stringArg(arguments.get("path"), null);
         if (path == null || path.isBlank()) {
-            return textResult("path is required for action='delete'.");
+            return errorResult("path is required for action='delete'.");
         }
 
         String normalizedPath = normalizePath(path);
         if ("/".equals(normalizedPath)) {
-            return textResult("Refusing to delete the project root folder.");
+            return errorResult("Refusing to delete the project root folder.");
         }
 
         String targetType = stringArg(arguments.get("target_type"), "auto").toLowerCase();
@@ -165,14 +163,14 @@ public class ProjectFilesTool implements McpTool {
                     return textResult("Deleted project file: " + deletedPath);
                 }
                 if ("file".equals(targetType)) {
-                    return textResult("Project file not found: " + normalizedPath);
+                    return errorResult("Project file not found: " + normalizedPath);
                 }
             }
 
             if ("folder".equals(targetType) || "auto".equals(targetType)) {
                 DomainFolder folder = resolveFolder(root, normalizedPath);
                 if (folder == null) {
-                    return textResult("Project folder not found: " + normalizedPath);
+                    return errorResult("Project folder not found: " + normalizedPath);
                 }
                 int deleted = deleteFolder(folder, recursive);
                 if (backend != null) {
@@ -182,10 +180,10 @@ public class ProjectFilesTool implements McpTool {
                     " (" + deleted + " entr" + (deleted == 1 ? "y" : "ies") + ")");
             }
 
-            return textResult("Invalid target_type: " + targetType + ". Use auto, file, or folder.");
+            return errorResult("Invalid target_type: " + targetType + ". Use auto, file, or folder.");
         } catch (Exception e) {
             Msg.error(this, "Failed to delete project entry: " + normalizedPath, e);
-            return textResult("Failed to delete '" + normalizedPath + "': " +
+            return errorResult("Failed to delete '" + normalizedPath + "': " +
                 e.getClass().getSimpleName() + ": " + e.getMessage() +
                 "\nIf the file is open in CodeBrowser, close it and try again.");
         }
@@ -273,6 +271,11 @@ public class ProjectFilesTool implements McpTool {
             return text;
         }
         return defaultValue;
+    }
+
+    private McpSchema.CallToolResult errorResult(String message) {
+        return McpSchema.CallToolResult.builder()
+            .addTextContent(message).isError(true).build();
     }
 
     private McpSchema.CallToolResult textResult(String message) {
