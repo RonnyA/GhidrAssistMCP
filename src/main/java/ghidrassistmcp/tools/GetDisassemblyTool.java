@@ -155,9 +155,14 @@ public class GetDisassemblyTool implements McpTool {
                     result.append("\n");
                     currentAddr = data.getMaxAddress().next();
                 } else {
-                    // Undefined byte/word — show raw value
+                    // Undefined byte/word — show raw value.
+                    // One addressable unit is wordSize bytes: 1 on a byte machine, 2 on a word
+                    // machine such as the ND-100. Address.next() is add(1) and that 1 is a BYTE,
+                    // so stepping with next() on a word machine printed every word twice with
+                    // overlapping half-word rows like "ram:0001.1" (seen 2026-10-12 on
+                    // NPL-1896D.BPUN). Step by wordSize bytes to land on the next word.
+                    int wordSize = currentAddr.getAddressSpace().getAddressableUnitSize();
                     try {
-                        int wordSize = currentAddr.getAddressSpace().getAddressableUnitSize();
                         if (wordSize == 2) {
                             short val = memory.getShort(currentAddr);
                             result.append(currentAddr).append(": ");
@@ -178,7 +183,7 @@ public class GetDisassemblyTool implements McpTool {
                     } catch (Exception e) {
                         result.append(currentAddr).append(": <unreadable>\n");
                     }
-                    currentAddr = currentAddr.next();
+                    currentAddr = currentAddr.add(wordSize);
                 }
                 unitCount++;
             }
