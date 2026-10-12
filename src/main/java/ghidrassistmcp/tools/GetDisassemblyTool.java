@@ -121,17 +121,14 @@ public class GetDisassemblyTool implements McpTool {
                     result.append("?? ??       ");
                 }
 
-                result.append(instruction.getMnemonicString());
-
-                // Add operands
-                for (int i = 0; i < instruction.getNumOperands(); i++) {
-                    if (i == 0) {
-                        result.append(" ");
-                    } else {
-                        result.append(", ");
-                    }
-                    result.append(instruction.getDefaultOperandRepresentation(i));
-                }
+                // The whole instruction text as the listing shows it: mnemonic, operand separators
+                // and operands. Printing getMnemonicString() and the operands alone loses every
+                // literal the SLEIGH puts between or around operands, which Ghidra keeps as
+                // separators (Instruction.getSeparator(i)): for the ND-100 the "I *" of an indirect
+                // jump and the ",B" / ",X" suffixes, so "JMP I *0x02" came out as "JMP 0x2"
+                // (found 2026-10-12 on NPL-1896D.BPUN). Instruction.toString() joins mnemonic,
+                // separators and operands in order.
+                result.append(instruction.toString());
 
                 // Add EOL comment
                 String comment = instruction.getComment(CommentType.EOL);
