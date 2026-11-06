@@ -34,6 +34,7 @@ import ghidrassistmcp.GhidrAssistMCPPlugin;
 import ghidrassistmcp.McpTool;
 import ghidrassistmcp.tasks.McpTask;
 import io.modelcontextprotocol.spec.McpSchema;
+import utilities.util.FileUtilities;
 
 public class GhidraScriptsTool implements McpTool {
 
@@ -358,7 +359,10 @@ public class GhidraScriptsTool implements McpTool {
                 String.join("/", info.getCategory()),
                 nullToEmpty(info.getDescription()),
                 child.getAbsolutePath(),
-                userDir.containsPath(child)));
+                // Ghidra 12.2 removed ResourceFile.containsPath(). In 12.0.4 it was exactly
+                // FileUtilities.isPathContainedWithin(getFile(false), other.getFile(false)),
+                // which still exists in 12.2, so this is the same check on every version.
+                FileUtilities.isPathContainedWithin(userDir.getFile(false), child.getFile(false))));
         }
     }
 
